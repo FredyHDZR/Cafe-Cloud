@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from http import HTTPStatus
 from typing import Any, cast
 
@@ -30,16 +30,19 @@ def error_response(
     code: str,
     message: str,
     details: list[dict[str, Any]] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     trace_id = resolve_trace_id(request)
     body = ErrorResponse(
         error=ErrorDetail(code=code, message=message, trace_id=trace_id, details=details)
     )
-    headers = {TRACE_ID_HEADER: trace_id} if trace_id is not None else None
+    response_headers = dict(headers or {})
+    if trace_id is not None:
+        response_headers[TRACE_ID_HEADER] = trace_id
     return JSONResponse(
         status_code=status_code,
         content=body.model_dump(exclude_none=True),
-        headers=headers,
+        headers=response_headers or None,
     )
 
 
@@ -52,7 +55,13 @@ def _status_code_slug(status_code: int) -> str:
 
 async def _domain_error_handler(request: Request, exc: DomainError) -> Response:
     logger.warning(exc.message, extra=log_context(code=exc.code))
-    return error_response(request, status_code=int(exc.status), code=exc.code, message=exc.message)
+    return error_response(
+        request,
+        status_code=int(exc.status),
+        code=exc.code,
+        message=exc.message,
+        headers=exc.headers,
+    )
 
 
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> Response:
