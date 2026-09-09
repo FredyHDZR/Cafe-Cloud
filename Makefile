@@ -2,47 +2,78 @@
 # Café Cloud — automatización
 # =============================================================================
 #
-# Aquí solo hay objetivos que ejecutan algo de verdad. `migrate`, `seed`, `test`
-# y `lint` se añaden en el ticket que trae lo que ejecutan (TICKET-002 y
-# siguientes): un objetivo que no hace nada es peor que su ausencia.
+# Aquí solo hay objetivos que ejecutan algo de verdad. `seed` se añadirá en
+# TICKET-011, que es el ticket que trae los datos de ejemplo: un objetivo que no
+# hace nada es peor que su ausencia.
+#
+# `lint` y `test` no necesitan Python en la máquina: corren dentro de la etapa
+# `dev` de la imagen del servicio, que es donde viven ruff, mypy y pytest.
 #
 # Uso:
-#   make up                 levanta los tres almacenes en segundo plano
+#   make up                 levanta todo el entorno en segundo plano
+#   make build              construye las imágenes de los servicios
 #   make ps                 estado y salud de los contenedores
 #   make logs               sigue los logs de todos; make logs S=postgres, de uno
+#   make migrate            alembic upgrade head en un contenedor de un solo uso
+#   make lint               ruff + mypy sobre orders-service
+#   make test               pytest sobre orders-service
 #   make psql               shell de psql sobre la base cafecloud
 #   make redis-cli          shell de redis-cli
 #   make mongosh            shell de mongosh sobre la base cafecloud
 #   make down               detiene y elimina los contenedores (los datos siguen)
-#   make down ARGS=-v       además borra los volúmenes: estado limpio de verdad
+#   make down ARGS=-v       además borra los volúmenes
+#   make clean              contenedores, volúmenes e imágenes locales fuera
 # =============================================================================
 
 # Si existe .env, sus valores mandan sobre los de abajo (por eso van con ?=).
 -include .env
 
-COMPOSE       ?= docker compose
+DOCKER        ?= docker
+COMPOSE       ?= $(DOCKER) compose
 POSTGRES_USER ?= postgres
 POSTGRES_DB   ?= cafecloud
 MONGO_DB      ?= cafecloud
+
+ORDERS_DIR       ?= orders-service
+ORDERS_DEV_IMAGE ?= cafecloud/orders-service:dev
 
 # Servicio opcional para `logs`; vacío significa todos.
 S    ?=
 # Argumentos extra para `down`, típicamente -v.
 ARGS ?=
 
-.PHONY: up down ps logs psql redis-cli mongosh
+.PHONY: up build down clean ps logs migrate lint test orders-dev-image psql redis-cli mongosh
 
 up:
-	$(COMPOSE) up -d
+	$(COMPOSE) up -d --build
+
+build:
+	$(COMPOSE) build
 
 down:
 	$(COMPOSE) down --remove-orphans $(ARGS)
+
+clean:
+	$(COMPOSE) down --remove-orphans --volumes --rmi local
+	-$(DOCKER) image rm $(ORDERS_DEV_IMAGE)
 
 ps:
 	$(COMPOSE) ps
 
 logs:
 	$(COMPOSE) logs -f --tail=100 $(S)
+
+migrate:
+	$(COMPOSE) run --rm orders-migrate
+
+orders-dev-image:
+	$(DOCKER) build --target dev -t $(ORDERS_DEV_IMAGE) $(ORDERS_DIR)
+
+lint: orders-dev-image
+	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
+
+test: orders-dev-image
+	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) pytest
 
 psql:
 	$(COMPOSE) exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)

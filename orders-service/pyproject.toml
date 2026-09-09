@@ -1,0 +1,55 @@
+[tool.poetry]
+name = "orders-service"
+version = "0.1.0"
+description = "Cafe Cloud - servicio de pedidos"
+authors = ["Cafe Cloud"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = ">=0.115,<1.0"
+uvicorn = { extras = ["standard"], version = ">=0.30,<1.0" }
+sqlalchemy = { extras = ["asyncio"], version = "^2.0.36" }
+asyncpg = ">=0.29,<1.0"
+alembic = "^1.13"
+pydantic-settings = "^2.5"
+redis = ">=5.0,<7.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0,<10.0"
+httpx = ">=0.27,<1.0"
+ruff = ">=0.6,<1.0"
+mypy = ">=1.11,<3.0"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+# Sin "D" (pydocstyle) a proposito: TICKET-002 prohibe exigir docstring por sistema.
+select = ["E", "W", "F", "I", "N", "UP", "ANN", "ASYNC", "B", "C4", "SIM", "PT", "TID", "RUF"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+# El directorio ./alembic ensombrece al paquete alembic y ruff lo tomaria por codigo propio.
+known-third-party = ["alembic"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+files = ["app", "tests", "alembic"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
