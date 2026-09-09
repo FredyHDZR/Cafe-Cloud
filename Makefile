@@ -16,8 +16,8 @@
 #   make logs               sigue los logs de todos; make logs S=postgres, de uno
 #   make migrate            alembic upgrade head de las DOS cadenas, cada una en
 #                           un contenedor de un solo uso y con su propio rol
-#   make lint               ruff + mypy sobre los servicios
-#   make test               pytest sobre los servicios
+#   make lint               ruff + mypy sobre los tres servicios
+#   make test               pytest sobre los tres servicios
 #   make psql               shell de psql sobre la base cafecloud
 #   make redis-cli          shell de redis-cli
 #   make mongosh            shell de mongosh sobre la base cafecloud
@@ -39,6 +39,8 @@ ORDERS_DIR          ?= orders-service
 ORDERS_DEV_IMAGE    ?= cafecloud/orders-service:dev
 PROCESSOR_DIR       ?= processor-service
 PROCESSOR_DEV_IMAGE ?= cafecloud/processor-service:dev
+NOTIFIER_DIR        ?= notifier-service
+NOTIFIER_DEV_IMAGE  ?= cafecloud/notifier-service:dev
 
 # Servicio opcional para `logs`; vacío significa todos.
 S    ?=
@@ -46,7 +48,7 @@ S    ?=
 ARGS ?=
 
 .PHONY: up build down clean ps logs migrate lint test dev-images orders-dev-image \
-	processor-dev-image psql redis-cli mongosh
+	processor-dev-image notifier-dev-image psql redis-cli mongosh
 
 up:
 	$(COMPOSE) up -d --build
@@ -59,7 +61,7 @@ down:
 
 clean:
 	$(COMPOSE) down --remove-orphans --volumes --rmi local
-	-$(DOCKER) image rm $(ORDERS_DEV_IMAGE) $(PROCESSOR_DEV_IMAGE)
+	-$(DOCKER) image rm $(ORDERS_DEV_IMAGE) $(PROCESSOR_DEV_IMAGE) $(NOTIFIER_DEV_IMAGE)
 
 ps:
 	$(COMPOSE) ps
@@ -77,15 +79,20 @@ orders-dev-image:
 processor-dev-image:
 	$(DOCKER) build --target dev -t $(PROCESSOR_DEV_IMAGE) $(PROCESSOR_DIR)
 
-dev-images: orders-dev-image processor-dev-image
+notifier-dev-image:
+	$(DOCKER) build --target dev -t $(NOTIFIER_DEV_IMAGE) $(NOTIFIER_DIR)
+
+dev-images: orders-dev-image processor-dev-image notifier-dev-image
 
 lint: dev-images
 	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
 	$(DOCKER) run --rm $(PROCESSOR_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
+	$(DOCKER) run --rm $(NOTIFIER_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
 
 test: dev-images
 	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) pytest
 	$(DOCKER) run --rm $(PROCESSOR_DEV_IMAGE) pytest
+	$(DOCKER) run --rm $(NOTIFIER_DEV_IMAGE) pytest
 
 psql:
 	$(COMPOSE) exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)
