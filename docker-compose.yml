@@ -1,15 +1,34 @@
-# Café Cloud — infraestructura de datos (TICKET-001).
+# Café Cloud — infraestructura de datos (TICKET-001) y `orders-service` (TICKET-002).
 #
-# Este Compose levanta solo los tres almacenes: Postgres, Redis y Mongo.
-# Los servicios de aplicación (orders, processor, notifier, cleanup-job) se
-# añaden en los tickets siguientes.
+# Los almacenes son Postgres, Redis y Mongo. Los servicios de aplicación que
+# faltan (processor, notifier, cleanup-job) se añaden en los tickets siguientes.
 #
 # Arranca sin configurar nada: todas las variables tienen valor por defecto de
 # desarrollo. Para cambiarlas, copiar `.env.example` a `.env` y editarlo.
 #
-#   docker compose up -d
+#   docker compose up -d --build
 #
 name: cafecloud
+
+# Imagen y entorno compartidos por `orders-service` y `orders-migrate`: son el
+# mismo artefacto ejecutando dos procesos distintos.
+x-orders-image: &orders-image
+  build:
+    context: ./orders-service
+    dockerfile: Dockerfile
+    target: runtime
+  image: cafecloud/orders-service:0.1.0
+
+x-orders-env: &orders-env
+  # La cadena se compone aquí a partir del rol de aplicación: `orders_rw`, nunca
+  # el superusuario (TICKET-002, decisión 4). El host es siempre `postgres`,
+  # el nombre del servicio en la red del proyecto.
+  DATABASE_URL: postgresql+asyncpg://${ORDERS_DB_USER:-orders_rw}:${ORDERS_DB_PASSWORD:-orders_dev_pw}@postgres:5432/${POSTGRES_DB:-cafecloud}
+  REDIS_URL: redis://redis:6379/${ORDERS_REDIS_DB:-0}
+  SERVICE_NAME: ${ORDERS_SERVICE_NAME:-orders-service}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  # La migración 0001 concede sobre este rol; si se cambia el nombre, el GRANT lo sigue.
+  PROCESSOR_DB_USER: ${PROCESSOR_DB_USER:-processor_rw}
 
 services:
   # ---------------------------------------------------------------------------
@@ -98,6 +117,54 @@ services:
       timeout: 3s
       retries: 10
       start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Migraciones del esquema `orders` (Alembic). Contenedor de un solo uso:
+  # ejecuta `alembic upgrade head` y termina; `orders-service` no arranca hasta
+  # que este contenedor sale con código 0 (TICKET-002, decisión 2).
+  # Corre con `orders_rw`, el rol dueño del esquema, y necesita el mismo bloque
+  # de entorno que el servicio porque `alembic/env.py` reutiliza `Settings`.
+  # ---------------------------------------------------------------------------
+  orders-migrate:
+    <<: *orders-image
+    container_name: cafecloud-orders-migrate
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *orders-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # orders-service — API de pedidos (FastAPI sobre uvicorn).
+  # ---------------------------------------------------------------------------
+  orders-service:
+    <<: *orders-image
+    container_name: cafecloud-orders-service
+    restart: unless-stopped
+    environment:
+      <<: *orders-env
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${ORDERS_SERVICE_PORT:-8001}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      orders-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Sin `curl` en la imagen final: se comprueba con el intérprete que ya está dentro.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   pgdata:
