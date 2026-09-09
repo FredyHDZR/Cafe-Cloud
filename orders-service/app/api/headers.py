@@ -1,0 +1,2 @@
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed"

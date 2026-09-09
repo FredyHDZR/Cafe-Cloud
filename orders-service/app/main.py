@@ -6,7 +6,7 @@ from fastapi import FastAPI
 
 from app.api.errors import register_exception_handlers
 from app.api.middleware import RequestLogMiddleware, TraceIdMiddleware
-from app.api.routers import health
+from app.api.routers import health, orders
 from app.infra.config import Settings, get_settings
 from app.infra.database import Database
 from app.infra.logging import configure_logging, log_context
@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
 
     register_exception_handlers(app)
     app.include_router(health.router)
+    app.include_router(orders.router)
     return app
 
 
