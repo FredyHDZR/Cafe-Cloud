@@ -14,9 +14,10 @@
 #   make build              construye las imágenes de los servicios
 #   make ps                 estado y salud de los contenedores
 #   make logs               sigue los logs de todos; make logs S=postgres, de uno
-#   make migrate            alembic upgrade head en un contenedor de un solo uso
-#   make lint               ruff + mypy sobre orders-service
-#   make test               pytest sobre orders-service
+#   make migrate            alembic upgrade head de las DOS cadenas, cada una en
+#                           un contenedor de un solo uso y con su propio rol
+#   make lint               ruff + mypy sobre los servicios
+#   make test               pytest sobre los servicios
 #   make psql               shell de psql sobre la base cafecloud
 #   make redis-cli          shell de redis-cli
 #   make mongosh            shell de mongosh sobre la base cafecloud
@@ -34,15 +35,18 @@ POSTGRES_USER ?= postgres
 POSTGRES_DB   ?= cafecloud
 MONGO_DB      ?= cafecloud
 
-ORDERS_DIR       ?= orders-service
-ORDERS_DEV_IMAGE ?= cafecloud/orders-service:dev
+ORDERS_DIR          ?= orders-service
+ORDERS_DEV_IMAGE    ?= cafecloud/orders-service:dev
+PROCESSOR_DIR       ?= processor-service
+PROCESSOR_DEV_IMAGE ?= cafecloud/processor-service:dev
 
 # Servicio opcional para `logs`; vacío significa todos.
 S    ?=
 # Argumentos extra para `down`, típicamente -v.
 ARGS ?=
 
-.PHONY: up build down clean ps logs migrate lint test orders-dev-image psql redis-cli mongosh
+.PHONY: up build down clean ps logs migrate lint test dev-images orders-dev-image \
+	processor-dev-image psql redis-cli mongosh
 
 up:
 	$(COMPOSE) up -d --build
@@ -55,7 +59,7 @@ down:
 
 clean:
 	$(COMPOSE) down --remove-orphans --volumes --rmi local
-	-$(DOCKER) image rm $(ORDERS_DEV_IMAGE)
+	-$(DOCKER) image rm $(ORDERS_DEV_IMAGE) $(PROCESSOR_DEV_IMAGE)
 
 ps:
 	$(COMPOSE) ps
@@ -65,15 +69,23 @@ logs:
 
 migrate:
 	$(COMPOSE) run --rm orders-migrate
+	$(COMPOSE) run --rm processor-migrate
 
 orders-dev-image:
 	$(DOCKER) build --target dev -t $(ORDERS_DEV_IMAGE) $(ORDERS_DIR)
 
-lint: orders-dev-image
-	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
+processor-dev-image:
+	$(DOCKER) build --target dev -t $(PROCESSOR_DEV_IMAGE) $(PROCESSOR_DIR)
 
-test: orders-dev-image
+dev-images: orders-dev-image processor-dev-image
+
+lint: dev-images
+	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
+	$(DOCKER) run --rm $(PROCESSOR_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
+
+test: dev-images
 	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) pytest
+	$(DOCKER) run --rm $(PROCESSOR_DEV_IMAGE) pytest
 
 psql:
 	$(COMPOSE) exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)
