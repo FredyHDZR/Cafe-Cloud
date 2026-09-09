@@ -1,0 +1,105 @@
+# Café Cloud — infraestructura de datos (TICKET-001).
+#
+# Este Compose levanta solo los tres almacenes: Postgres, Redis y Mongo.
+# Los servicios de aplicación (orders, processor, notifier, cleanup-job) se
+# añaden en los tickets siguientes.
+#
+# Arranca sin configurar nada: todas las variables tienen valor por defecto de
+# desarrollo. Para cambiarlas, copiar `.env.example` a `.env` y editarlo.
+#
+#   docker compose up -d
+#
+name: cafecloud
+
+services:
+  # ---------------------------------------------------------------------------
+  # Postgres 16 — pedidos (esquema `orders`) y estado del procesador
+  # (esquema `processor`). Los esquemas y los roles los crea el script de
+  # init `infra/postgres/init/01-schemas-roles.sql`, que el entrypoint oficial
+  # ejecuta una única vez, cuando el volumen de datos está vacío.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: cafecloud-postgres
+    restart: unless-stopped
+    environment:
+      # Superusuario del contenedor. Las aplicaciones NO lo usan: cada servicio
+      # entra con su propio rol (ADR-006).
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-cafecloud}
+      # Roles de aplicación. El script de init los lee con `\getenv`, de modo
+      # que ninguna contraseña queda escrita en el SQL ni en la imagen.
+      ORDERS_DB_USER: ${ORDERS_DB_USER:-orders_rw}
+      ORDERS_DB_PASSWORD: ${ORDERS_DB_PASSWORD:-orders_dev_pw}
+      PROCESSOR_DB_USER: ${PROCESSOR_DB_USER:-processor_rw}
+      PROCESSOR_DB_PASSWORD: ${PROCESSOR_DB_PASSWORD:-processor_dev_pw}
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # `-h 127.0.0.1` no es decorativo: durante la inicialización el entrypoint
+      # levanta un servidor temporal con `listen_addresses=''` que SÍ acepta
+      # conexiones por el socket Unix. Un `pg_isready` sin `-h` lo encontraría y
+      # marcaría el contenedor `healthy` mientras el script de init todavía se
+      # está ejecutando. Comprobando el puerto TCP, `healthy` significa lo único
+      # que sirve: init terminado y servidor real aceptando clientes. De eso
+      # depende el `depends_on: condition: service_healthy` de TICKET-002.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 — broker de eventos (Redis Streams, ADR-001).
+  # AOF obligatorio con fsync cada segundo: sin esto, un reinicio se lleva por
+  # delante los streams y la Pending Entries List.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: cafecloud-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli PING | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # MongoDB 7 — notificaciones (ADR-005).
+  # La colección y sus tres índices los crea
+  # `infra/mongo/init/01-notifications-indexes.js`, que el entrypoint ejecuta
+  # una sola vez contra la base `MONGO_INITDB_DATABASE`.
+  # Nodo único, sin replica set y sin autenticación: entorno de desarrollo.
+  # ---------------------------------------------------------------------------
+  mongo:
+    image: mongo:7
+    container_name: cafecloud-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-cafecloud}
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongodata:/data/db
+      - ./infra/mongo/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  pgdata:
+  redisdata:
+  mongodata:
