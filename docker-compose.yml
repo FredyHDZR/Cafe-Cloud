@@ -1,8 +1,9 @@
 # Café Cloud — infraestructura de datos (TICKET-001), `orders-service`
-# (TICKET-002) y su publicador de outbox (TICKET-004).
+# (TICKET-002), su publicador de outbox (TICKET-004) y `processor-service`
+# (TICKET-005).
 #
 # Los almacenes son Postgres, Redis y Mongo. Los servicios de aplicación que
-# faltan (processor, notifier, cleanup-job) se añaden en los tickets siguientes.
+# faltan (notifier, cleanup-job) se añaden en los tickets siguientes.
 #
 # Arranca sin configurar nada: todas las variables tienen valor por defecto de
 # desarrollo. Para cambiarlas, copiar `.env.example` a `.env` y editarlo.
@@ -19,6 +20,24 @@ x-orders-image: &orders-image
     dockerfile: Dockerfile
     target: runtime
   image: cafecloud/orders-service:0.1.0
+
+# Imagen y entorno compartidos por `processor-migrate`, `processor-service` y
+# `processor-outbox-publisher`: el mismo artefacto ejecutando tres procesos.
+x-processor-image: &processor-image
+  build:
+    context: ./processor-service
+    dockerfile: Dockerfile
+    target: runtime
+  image: cafecloud/processor-service:0.1.0
+
+x-processor-env: &processor-env
+  # Rol propio, `processor_rw`: dueño del esquema `processor` y con permiso
+  # únicamente de SELECT y UPDATE de tres columnas sobre `orders.orders`
+  # (ADR-006). El límite lo impone Postgres, no el código.
+  DATABASE_URL: postgresql+asyncpg://${PROCESSOR_DB_USER:-processor_rw}:${PROCESSOR_DB_PASSWORD:-processor_dev_pw}@postgres:5432/${POSTGRES_DB:-cafecloud}
+  REDIS_URL: redis://redis:6379/${PROCESSOR_REDIS_DB:-0}
+  SERVICE_NAME: ${PROCESSOR_SERVICE_NAME:-processor-service}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
 x-orders-env: &orders-env
   # La cadena se compone aquí a partir del rol de aplicación: `orders_rw`, nunca
@@ -197,6 +216,78 @@ services:
       replicas: 1
     # SIGTERM corta el bucle al terminar el ciclo en curso; el margen cubre un
     # ciclo con un lote completo por publicar.
+    stop_grace_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Migraciones del esquema `processor` (Alembic). Cadena propia, contenedor de
+  # un solo uso y rol propio: `processor_rw` es el dueño del esquema, así que sus
+  # tablas nacen suyas (ADR-006). Es la segunda cadena del proyecto; `make
+  # migrate` ejecuta las dos.
+  # ---------------------------------------------------------------------------
+  processor-migrate:
+    <<: *processor-image
+    container_name: cafecloud-processor-migrate
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *processor-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # processor-service — consumidor de `orders.created` (TICKET-005). Lee con
+  # XREADGROUP, simula la preparación, pasa el pedido a COMPLETED y encola
+  # `orders.completed` en su outbox, todo en una transacción; el XACK va
+  # después del commit.
+  # ---------------------------------------------------------------------------
+  processor-service:
+    <<: *processor-image
+    container_name: cafecloud-processor-service
+    restart: unless-stopped
+    command: ["python", "-m", "app.consumer"]
+    environment:
+      <<: *processor-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      processor-migrate:
+        condition: service_completed_successfully
+      # No es una dependencia de arranque cualquiera: los GRANT de ADR-006 sobre
+      # `orders.orders` se conceden dentro de la migración 0001 de orders-service,
+      # así que sin ella este servicio arrancaría sin permiso para completar nada.
+      orders-migrate:
+        condition: service_completed_successfully
+    # Sin healthcheck: no expone HTTP todavía. El /health de los tres servicios
+    # es TICKET-009.
+    stop_grace_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Publicador de outbox de processor-service — saca los eventos de
+  # `processor.outbox` al stream `orders.completed` (ADR-002, TICKET-005).
+  # Mismo diseño y mismo código que el de orders-service, con otro repositorio.
+  # ---------------------------------------------------------------------------
+  processor-outbox-publisher:
+    <<: *processor-image
+    container_name: cafecloud-processor-outbox-publisher
+    restart: unless-stopped
+    command: ["python", "-m", "app.publisher"]
+    environment:
+      <<: *processor-env
+      SERVICE_NAME: ${PROCESSOR_PUBLISHER_SERVICE_NAME:-processor-outbox-publisher}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      processor-migrate:
+        condition: service_completed_successfully
+    # Una sola réplica, por el mismo motivo que en orders-service: el orden de
+    # `orders.completed` solo se conserva con un único publicador (ADR-002).
+    deploy:
+      replicas: 1
     stop_grace_period: 15s
 
 volumes:
