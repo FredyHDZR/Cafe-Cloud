@@ -1,9 +1,9 @@
 # Café Cloud — infraestructura de datos (TICKET-001), `orders-service`
-# (TICKET-002), su publicador de outbox (TICKET-004) y `processor-service`
-# (TICKET-005).
+# (TICKET-002), su publicador de outbox (TICKET-004), `processor-service`
+# (TICKET-005) y `notifier-service` (TICKET-006).
 #
-# Los almacenes son Postgres, Redis y Mongo. Los servicios de aplicación que
-# faltan (notifier, cleanup-job) se añaden en los tickets siguientes.
+# Los almacenes son Postgres, Redis y Mongo. El servicio de aplicación que
+# falta (cleanup-job) se añade en TICKET-008.
 #
 # Arranca sin configurar nada: todas las variables tienen valor por defecto de
 # desarrollo. Para cambiarlas, copiar `.env.example` a `.env` y editarlo.
@@ -37,6 +37,25 @@ x-processor-env: &processor-env
   DATABASE_URL: postgresql+asyncpg://${PROCESSOR_DB_USER:-processor_rw}:${PROCESSOR_DB_PASSWORD:-processor_dev_pw}@postgres:5432/${POSTGRES_DB:-cafecloud}
   REDIS_URL: redis://redis:6379/${PROCESSOR_REDIS_DB:-0}
   SERVICE_NAME: ${PROCESSOR_SERVICE_NAME:-processor-service}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+# Imagen compartida por `notifier-service` y `notifier-consumer`: el mismo
+# artefacto ejecutando dos procesos (TICKET-006, decisión 2).
+x-notifier-image: &notifier-image
+  build:
+    context: ./notifier-service
+    dockerfile: Dockerfile
+    target: runtime
+  image: cafecloud/notifier-service:0.1.0
+
+x-notifier-env: &notifier-env
+  # Nodo único sin autenticación, así que la cadena no lleva credenciales. La
+  # colección y sus índices los crea el init de Mongo; este servicio solo los
+  # comprueba al arrancar (ADR-005, TICKET-001).
+  MONGO_URL: mongodb://mongo:27017
+  MONGO_DB: ${MONGO_DB:-cafecloud}
+  REDIS_URL: redis://redis:6379/${NOTIFIER_REDIS_DB:-0}
+  SERVICE_NAME: ${NOTIFIER_SERVICE_NAME:-notifier-service}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
 x-orders-env: &orders-env
@@ -132,7 +151,17 @@ services:
       - mongodata:/data/db
       - ./infra/mongo/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+      # No basta con el ping (TICKET-001, pendiente 7): el entrypoint levanta un
+      # `mongod` temporal en 127.0.0.1 mientras corren los scripts de init, y el
+      # healthcheck corre dentro del contenedor, así que un ping respondería
+      # `healthy` con la colección todavía sin crear. `notifier-service` cuelga
+      # de este healthcheck y se niega a arrancar sin el índice único, de modo
+      # que la carrera se traduciría en arranques fallidos. Se afirma sobre el
+      # estado real del init: los tres índices de ADR-005 más `_id_`. Si la
+      # colección no existe, `getIndexes()` lanza y el healthcheck falla.
+      test:
+        - CMD-SHELL
+        - 'mongosh "$$MONGO_INITDB_DATABASE" --quiet --eval "db.notifications.getIndexes().length >= 4" | grep -q true'
       interval: 5s
       timeout: 3s
       retries: 10
@@ -288,6 +317,56 @@ services:
     # `orders.completed` solo se conserva con un único publicador (ADR-002).
     deploy:
       replicas: 1
+    stop_grace_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # notifier-service — API de consulta de notificaciones (FastAPI sobre uvicorn).
+  # Solo lee Mongo; quien escribe es `notifier-consumer`. No toca Postgres nunca:
+  # `orders.completed` es autosuficiente por contrato.
+  # ---------------------------------------------------------------------------
+  notifier-service:
+    <<: *notifier-image
+    container_name: cafecloud-notifier-service
+    restart: unless-stopped
+    environment:
+      <<: *notifier-env
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${NOTIFIER_SERVICE_PORT:-8003}:8000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      # Sin `curl` en la imagen final: se comprueba con el intérprete que ya está dentro.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # notifier-consumer — consumidor de `orders.completed` (TICKET-006). Lee con
+  # XREADGROUP como grupo `notifier`, inserta el documento en `notifications` y
+  # solo entonces hace XACK. La deduplicación es el índice único sobre
+  # `event_id`: un DuplicateKeyError es éxito, no fallo (ADR-004, ADR-005).
+  # Contenedor aparte de la API, con la misma imagen (TICKET-006, decisión 2).
+  # ---------------------------------------------------------------------------
+  notifier-consumer:
+    <<: *notifier-image
+    container_name: cafecloud-notifier-consumer
+    restart: unless-stopped
+    command: ["python", "-m", "app.consumer"]
+    environment:
+      <<: *notifier-env
+      SERVICE_NAME: ${NOTIFIER_CONSUMER_SERVICE_NAME:-notifier-consumer}
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     stop_grace_period: 15s
 
 volumes:
