@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -39,3 +40,27 @@ def order_created_event(order: Order, trace_id: UUID) -> EventDraft:
         occurred_at=order.created_at,
         payload=order_created_payload(order),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class PendingEvent:
+    row_id: int
+    event_id: UUID
+    event_type: str
+    event_version: int
+    trace_id: UUID
+    occurred_at: datetime
+    payload: dict[str, Any]
+    attempts: int
+
+
+def envelope_fields(event: PendingEvent) -> dict[str, str]:
+    return {
+        "event_id": str(event.event_id),
+        "event_type": event.event_type,
+        "event_version": str(event.event_version),
+        # La columna guarda microsegundos y el contrato exige milisegundos con sufijo Z.
+        "occurred_at": to_rfc3339(event.occurred_at),
+        "trace_id": str(event.trace_id),
+        "payload": json.dumps(event.payload, ensure_ascii=False, separators=(",", ":")),
+    }

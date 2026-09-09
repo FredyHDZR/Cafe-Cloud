@@ -118,6 +118,7 @@ class OutboxEvent(Base):
     )
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     next_attempt_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -129,7 +130,7 @@ class OutboxEvent(Base):
         Index(
             "ix_outbox_unpublished",
             "next_attempt_at",
-            postgresql_where=text("published_at IS NULL"),
+            postgresql_where=text("published_at IS NULL AND failed_at IS NULL"),
         ),
     )
 

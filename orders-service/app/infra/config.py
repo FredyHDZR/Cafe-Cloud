@@ -34,6 +34,28 @@ class Settings(BaseSettings):
         return str(self.redis_url)
 
 
+class PublisherSettings(Settings):
+    poll_interval_ms: int = Field(default=200, alias="OUTBOX_POLL_INTERVAL_MS", gt=0)
+    batch_size: int = Field(default=100, alias="OUTBOX_BATCH_SIZE", gt=0)
+    max_attempts: int = Field(default=10, alias="OUTBOX_MAX_ATTEMPTS", gt=0)
+    backoff_base_seconds: float = Field(default=1.0, alias="OUTBOX_BACKOFF_BASE_SECONDS", gt=0)
+    backoff_max_seconds: float = Field(default=300.0, alias="OUTBOX_BACKOFF_MAX_SECONDS", gt=0)
+    stream_maxlen: int = Field(default=10_000, alias="OUTBOX_STREAM_MAXLEN", gt=0)
+    purge_every_cycles: int = Field(default=1500, alias="OUTBOX_PURGE_EVERY_CYCLES", gt=0)
+    purge_batch_size: int = Field(default=1000, alias="OUTBOX_PURGE_BATCH_SIZE", gt=0)
+    outbox_retention_hours: int = Field(default=24, alias="OUTBOX_RETENTION_HOURS", gt=0)
+    idempotency_grace_hours: int = Field(default=1, alias="IDEMPOTENCY_PURGE_GRACE_HOURS", ge=0)
+
+    @property
+    def poll_interval_seconds(self) -> float:
+        return self.poll_interval_ms / 1000
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+@lru_cache(maxsize=1)
+def get_publisher_settings() -> PublisherSettings:
+    return PublisherSettings()
