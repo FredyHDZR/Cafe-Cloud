@@ -1,4 +1,5 @@
-# Café Cloud — infraestructura de datos (TICKET-001) y `orders-service` (TICKET-002).
+# Café Cloud — infraestructura de datos (TICKET-001), `orders-service`
+# (TICKET-002) y su publicador de outbox (TICKET-004).
 #
 # Los almacenes son Postgres, Redis y Mongo. Los servicios de aplicación que
 # faltan (processor, notifier, cleanup-job) se añaden en los tickets siguientes.
@@ -10,8 +11,8 @@
 #
 name: cafecloud
 
-# Imagen y entorno compartidos por `orders-service` y `orders-migrate`: son el
-# mismo artefacto ejecutando dos procesos distintos.
+# Imagen y entorno compartidos por `orders-service`, `orders-migrate` y
+# `orders-outbox-publisher`: el mismo artefacto ejecutando tres procesos.
 x-orders-image: &orders-image
   build:
     context: ./orders-service
@@ -165,6 +166,38 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Publicador de outbox — saca los eventos de `orders.outbox` al stream
+  # `orders.created` de Redis (ADR-002, TICKET-004). Misma imagen que la API,
+  # otro proceso: el bucle de polling no compite con el event loop de uvicorn.
+  # ---------------------------------------------------------------------------
+  orders-outbox-publisher:
+    <<: *orders-image
+    container_name: cafecloud-orders-outbox-publisher
+    restart: unless-stopped
+    command: ["python", "-m", "app.publisher"]
+    environment:
+      <<: *orders-env
+      SERVICE_NAME: ${ORDERS_PUBLISHER_SERVICE_NAME:-orders-outbox-publisher}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      orders-migrate:
+        condition: service_completed_successfully
+    # Una sola réplica, y no es un detalle de despliegue: el orden global del
+    # stream solo se conserva con un único publicador (ADR-002). Con dos, el
+    # `FOR UPDATE SKIP LOCKED` reparte las filas y `orders.created` deja de ser
+    # FIFO; conservarlo exigiría particionar por `aggregate_id`. El
+    # `container_name` de arriba es la red de seguridad: con él, Compose se
+    # niega a escalar el servicio y avisa en lugar de levantar un segundo.
+    deploy:
+      replicas: 1
+    # SIGTERM corta el bucle al terminar el ciclo en curso; el margen cubre un
+    # ciclo con un lote completo por publicar.
+    stop_grace_period: 15s
 
 volumes:
   pgdata:

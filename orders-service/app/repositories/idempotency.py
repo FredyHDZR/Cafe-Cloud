@@ -1,12 +1,13 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.domain.idempotency import IdempotencyRecord, IdempotencyState
 from app.infra.models import IdempotencyKey as IdempotencyRow
 from app.repositories.base import SQLAlchemyRepository
+from app.repositories.intervals import interval
 
 
 class IdempotencyRepository(SQLAlchemyRepository):
@@ -72,3 +73,17 @@ class IdempotencyRepository(SQLAlchemyRepository):
                 completed_at=func.now(),
             )
         )
+
+    async def delete_expired(self, *, grace_hours: int, limit: int) -> int:
+        victims = (
+            select(IdempotencyRow.endpoint, IdempotencyRow.idempotency_key)
+            .where(IdempotencyRow.expires_at < func.now() - interval(hours=grace_hours))
+            .order_by(IdempotencyRow.expires_at)
+            .limit(limit)
+        )
+        deleted = await self._session.execute(
+            delete(IdempotencyRow)
+            .where(tuple_(IdempotencyRow.endpoint, IdempotencyRow.idempotency_key).in_(victims))
+            .returning(IdempotencyRow.idempotency_key)
+        )
+        return len(deleted.all())
