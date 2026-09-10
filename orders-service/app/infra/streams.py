@@ -4,7 +4,7 @@ from typing import cast
 from redis.asyncio import Redis
 from redis.typing import EncodableT, FieldT
 
-from app.infra.config import PublisherSettings
+from app.infra.config import PublisherSettings, Settings
 
 
 class RedisEventStream:
@@ -21,6 +21,22 @@ class RedisEventStream:
         entry = cast(dict[FieldT, EncodableT], dict(fields))
         entry_id = await self._client.xadd(stream, entry, maxlen=self._maxlen, approximate=True)
         return str(entry_id)
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+class RedisBroker:
+    def __init__(self, client: Redis) -> None:
+        self._client = client
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "RedisBroker":
+        client: Redis = Redis.from_url(settings.redis_dsn, decode_responses=True)
+        return cls(client)
+
+    async def ping(self) -> None:
+        await self._client.ping()
 
     async def close(self) -> None:
         await self._client.aclose()

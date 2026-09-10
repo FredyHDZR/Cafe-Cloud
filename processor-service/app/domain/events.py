@@ -13,6 +13,14 @@ ORDER_COMPLETED_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
+class OutboxStats:
+    pending: int
+    published: int
+    failed: int
+    oldest_pending_age_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class EventDraft:
     event_type: str
     event_version: int

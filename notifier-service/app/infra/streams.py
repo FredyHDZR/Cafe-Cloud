@@ -6,7 +6,7 @@ from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 from redis.typing import EncodableT, FieldT
 
-from app.infra.config import ConsumerSettings
+from app.infra.config import ConsumerSettings, Settings
 
 GROUP_EXISTS_PREFIX = "BUSYGROUP"
 NEW_MESSAGES = ">"
@@ -112,6 +112,16 @@ class RedisStreamConsumer:
         )
         return {str(item["message_id"]): int(item["times_delivered"]) for item in pending}
 
+    async def pending_count(self) -> int:
+        summary = await self._client.xpending(self._stream, self._group)
+        return int(summary["pending"])
+
+    async def dlq_length(self) -> int:
+        return int(await self._client.xlen(self._dlq_stream))
+
+    async def ping(self) -> None:
+        await self._client.ping()
+
     async def dead_letter(self, fields: Mapping[str, str]) -> str:
         entry = cast(dict[FieldT, EncodableT], dict(fields))
         # Sin MAXLEN: recortar la DLQ seria tirar lo que se guarda justo para no perderlo.
@@ -145,3 +155,19 @@ def _to_claimed(response: Any) -> list[StreamMessage]:
         for entry_id, fields in response[1]
         if fields
     ]
+
+
+class RedisBroker:
+    def __init__(self, client: Redis) -> None:
+        self._client = client
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "RedisBroker":
+        client: Redis = Redis.from_url(settings.redis_dsn, decode_responses=True)
+        return cls(client)
+
+    async def ping(self) -> None:
+        await self._client.ping()
+
+    async def close(self) -> None:
+        await self._client.aclose()

@@ -3,10 +3,11 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from motor.motor_asyncio import AsyncIOMotorCollection
-from pymongo import DESCENDING
+from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError
 
-from app.domain.notification import Notification, NotificationPage
+from app.domain.notification import Notification, NotificationPage, NotificationStats
+from app.domain.timestamps import utc_now
 from app.infra.logging import log_context
 from app.infra.mongo import Document
 
@@ -28,6 +29,10 @@ def to_document(notification: Notification) -> Document:
     }
 
 
+def as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
 def from_document(document: Document) -> Notification:
     created_at: datetime = document["created_at"]
     return Notification(
@@ -37,7 +42,7 @@ def from_document(document: Document) -> Notification:
         status=document["status"],
         message=document["message"],
         trace_id=UUID(document["trace_id"]),
-        created_at=created_at.replace(tzinfo=UTC) if created_at.tzinfo is None else created_at,
+        created_at=as_utc(created_at),
     )
 
 
@@ -75,4 +80,17 @@ class NotificationRepository:
             total=total,
             limit=limit,
             offset=offset,
+        )
+
+    async def stats(self) -> NotificationStats:
+        stored = await self._collection.count_documents({})
+        oldest = await self._collection.find_one(
+            projection={"_id": 0, "created_at": 1}, sort=[("created_at", ASCENDING)]
+        )
+        if oldest is None:
+            return NotificationStats(stored=stored, oldest_age_seconds=0.0)
+        created_at = as_utc(oldest["created_at"])
+        return NotificationStats(
+            stored=stored,
+            oldest_age_seconds=(utc_now() - created_at).total_seconds(),
         )

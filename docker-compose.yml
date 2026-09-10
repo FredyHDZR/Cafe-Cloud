@@ -9,6 +9,15 @@
 #
 #   docker compose up -d --build
 #
+# Sondas de salud (TICKET-009, decisión 9): el `healthcheck` de los cuatro
+# procesos que sirven HTTP apunta a `/health/live`, la vitalidad, y no a
+# `/health`. Un healthcheck responde a "¿hay que reiniciar este contenedor?", y
+# esa pregunta solo la contesta el proceso: que Mongo o Redis estén caídos ya lo
+# dice su propia fila en `docker compose ps`, y contagiarlo al vecino sano repite
+# el mismo aviso y bloquea a quien dependa de él por `condition: service_healthy`.
+# La preparación se lee en `/health` y `/health/ready`, que devuelven 503 cuando
+# una dependencia crítica está caída.
+#
 name: cafecloud
 
 # Imagen y entorno compartidos por `orders-service`, `orders-migrate` y
@@ -37,6 +46,7 @@ x-processor-env: &processor-env
   REDIS_URL: redis://redis:6379/${PROCESSOR_REDIS_DB:-0}
   SERVICE_NAME: ${PROCESSOR_SERVICE_NAME:-processor-service}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  HEALTH_PROBE_TIMEOUT_SECONDS: ${HEALTH_PROBE_TIMEOUT_SECONDS:-2}
 
 # Imagen compartida por `notifier-service` y `notifier-consumer`: el mismo
 # artefacto ejecutando dos procesos (TICKET-006, decisión 2).
@@ -56,6 +66,7 @@ x-notifier-env: &notifier-env
   REDIS_URL: redis://redis:6379/${NOTIFIER_REDIS_DB:-0}
   SERVICE_NAME: ${NOTIFIER_SERVICE_NAME:-notifier-service}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  HEALTH_PROBE_TIMEOUT_SECONDS: ${HEALTH_PROBE_TIMEOUT_SECONDS:-2}
 
 x-orders-env: &orders-env
   # La cadena se compone aquí a partir del rol de aplicación: `orders_rw`, nunca
@@ -65,6 +76,7 @@ x-orders-env: &orders-env
   REDIS_URL: redis://redis:6379/${ORDERS_REDIS_DB:-0}
   SERVICE_NAME: ${ORDERS_SERVICE_NAME:-orders-service}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  HEALTH_PROBE_TIMEOUT_SECONDS: ${HEALTH_PROBE_TIMEOUT_SECONDS:-2}
   # La migración 0001 concede sobre este rol; si se cambia el nombre, el GRANT lo sigue.
   PROCESSOR_DB_USER: ${PROCESSOR_DB_USER:-processor_rw}
 
@@ -109,6 +121,9 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+      # Todo el arranque cuelga de este healthcheck: sondear cada 2 s mientras
+      # dura el init recorta la espera de los siete servicios que dependen de él.
+      start_interval: 2s
 
   # ---------------------------------------------------------------------------
   # Redis 7 — broker de eventos (Redis Streams, ADR-001).
@@ -130,6 +145,7 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
+      start_interval: 2s
 
   # ---------------------------------------------------------------------------
   # MongoDB 7 — notificaciones (ADR-005).
@@ -165,6 +181,7 @@ services:
       timeout: 3s
       retries: 10
       start_period: 30s
+      start_interval: 2s
 
   # ---------------------------------------------------------------------------
   # Migraciones del esquema `orders` (Alembic). Contenedor de un solo uso:
@@ -204,15 +221,21 @@ services:
         condition: service_completed_successfully
     healthcheck:
       # Sin `curl` en la imagen final: se comprueba con el intérprete que ya está dentro.
+      # `/health/live` no toca ninguna dependencia (ver la cabecera del archivo).
       test:
         - CMD
         - python
         - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3)
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=3)
+      # El `timeout` cubre el arranque del intérprete más los 3 s de la sonda. El
+      # `start_period` es generoso a propósito: solo retrasa el veredicto de
+      # `unhealthy` en un arranque lento, y `start_interval` hace que un arranque
+      # normal llegue a `healthy` en segundos y no en el primer `interval`.
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
 
   # ---------------------------------------------------------------------------
   # Publicador de outbox — saca los eventos de `orders.outbox` al stream
@@ -242,6 +265,12 @@ services:
     # niega a escalar el servicio y avisa en lugar de levantar un segundo.
     deploy:
       replicas: 1
+    # Sin `healthcheck`: no sirve HTTP y no guarda estado que su almacén no
+    # revele, así que su salud la publica el hermano que comparte la tabla, en
+    # `cafecloud_outbox_oldest_pending_age_seconds` del 8001 (TICKET-009,
+    # decisiones 4 y 12). Que el proceso viva se ve en `docker compose ps`,
+    # porque es el PID 1 del contenedor.
+    #
     # SIGTERM corta el bucle al terminar el ciclo en curso; el margen cubre un
     # ciclo con un lote completo por publicar.
     stop_grace_period: 15s
@@ -268,6 +297,8 @@ services:
   # XREADGROUP, simula la preparación, pasa el pedido a COMPLETED y encola
   # `orders.completed` en su outbox, todo en una transacción; el XACK va
   # después del commit.
+  # Desde TICKET-009 el mismo proceso sirve `/health` y `/metrics` en el 8000:
+  # los contadores del consumidor solo los puede exponer quien los incrementa.
   # ---------------------------------------------------------------------------
   processor-service:
     <<: *processor-image
@@ -276,6 +307,12 @@ services:
     command: ["python", "-m", "app.consumer"]
     environment:
       <<: *processor-env
+      HTTP_PORT: "8000"
+    # Puerto publicado en loopback: sin él, `/health` y `/metrics` de este proceso
+    # solo se leerían con `docker compose exec`, y son la mitad de la
+    # observabilidad del sistema (TICKET-009, decisión 11).
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${PROCESSOR_SERVICE_PORT:-8002}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -288,8 +325,19 @@ services:
       # así que sin ella este servicio arrancaría sin permiso para completar nada.
       orders-migrate:
         condition: service_completed_successfully
-    # Sin healthcheck: no expone HTTP todavía. El /health de los tres servicios
-    # es TICKET-009.
+    healthcheck:
+      # Vitalidad, no preparación: con Redis parado este proceso no tiene nada que
+      # consumir, pero está sano y reanuda solo cuando el broker vuelve.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
     stop_grace_period: 15s
 
   # ---------------------------------------------------------------------------
@@ -316,6 +364,8 @@ services:
     # `orders.completed` solo se conserva con un único publicador (ADR-002).
     deploy:
       replicas: 1
+    # Sin `healthcheck`, por el mismo motivo que el publicador de orders-service:
+    # su síntoma es `cafecloud_outbox_oldest_pending_age_seconds`, aquí en el 8002.
     stop_grace_period: 15s
 
   # ---------------------------------------------------------------------------
@@ -335,16 +385,19 @@ services:
       mongo:
         condition: service_healthy
     healthcheck:
-      # Sin `curl` en la imagen final: se comprueba con el intérprete que ya está dentro.
+      # Vitalidad, no preparación: un Mongo parado se ve en la fila de Mongo, y
+      # este proceso vuelve a servir en cuanto Mongo vuelve. El informe de
+      # dependencias, con su 503, está en `/health`.
       test:
         - CMD
         - python
         - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3)
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=3)
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
 
   # ---------------------------------------------------------------------------
   # notifier-consumer — consumidor de `orders.completed` (TICKET-006). Lee con
@@ -361,11 +414,30 @@ services:
     environment:
       <<: *notifier-env
       SERVICE_NAME: ${NOTIFIER_CONSUMER_SERVICE_NAME:-notifier-consumer}
+      HTTP_PORT: "8000"
+    # Puerto propio: los contadores de consumo (insertadas, duplicados, reintentos,
+    # envíos a DLQ) viven en este proceso, no en el de la API (TICKET-009, decisión 3).
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${NOTIFIER_CONSUMER_PORT:-8004}:8000"
     depends_on:
       mongo:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      # Vitalidad, no preparación (cabecera del archivo). El `start_period` cubre
+      # con holgura lo que este proceso hace antes de escuchar: comprobar el
+      # índice único de Mongo y crear el grupo de consumo en Redis.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
     stop_grace_period: 15s
 
   # ---------------------------------------------------------------------------
@@ -376,7 +448,10 @@ services:
   # Solo habla con Mongo: sin Postgres, sin Redis y sin puerto publicado.
   # Sin healthcheck: no es un servicio HTTP y no expone `/health`. El modo de un
   # solo disparo no sirve como sonda porque borra de verdad (TICKET-008,
-  # decisión 2); la salud se lee en `docker compose logs cleanup-job`.
+  # decisión 2); la salud se lee en `docker compose logs cleanup-job` y su
+  # parálisis en `cafecloud_notifications_oldest_age_seconds` del 8003, que crece
+  # por encima de la retención si el barrido deja de correr (TICKET-009,
+  # decisiones 4 y 12).
   # ---------------------------------------------------------------------------
   cleanup-job:
     build:

@@ -7,7 +7,7 @@ import pytest
 
 from app.domain.complete_order import CompleteOrderService, CompleteOutcome
 from app.domain.envelope import OrderCreatedEnvelope, parse_order_created
-from app.domain.errors import OrderNotCompletedError
+from app.domain.errors import OrderAlreadyCompletedError, OrderNotCompletedError
 from app.domain.events import EventDraft
 from app.domain.order import OrderTransition
 
@@ -181,24 +181,45 @@ def test_a_duplicate_neither_touches_the_order_nor_queues_a_second_event() -> No
     assert unit_of_work.rollbacks == 1
 
 
-def test_zero_updated_rows_is_success_and_still_emits_the_event() -> None:
+def test_an_order_already_completed_is_rejected_without_touching_the_outbox() -> None:
+    # ADR-007: la transicion, y no la deduplicacion, es lo que hace que orders.completed se emita
+    # como mucho una vez por pedido.
     orders = FakeOrders(
         OrderTransition(transitioned=False, completed_at=COMPLETED_AT, status="COMPLETED")
     )
     outbox = FakeOutbox()
     unit_of_work = FakeUnitOfWork()
 
-    outcome = run(
-        processed_events=FakeProcessedEvents(),
-        orders=orders,
-        outbox=outbox,
-        unit_of_work=unit_of_work,
-    )
+    with pytest.raises(OrderAlreadyCompletedError) as raised:
+        run(
+            processed_events=FakeProcessedEvents(),
+            orders=orders,
+            outbox=outbox,
+            unit_of_work=unit_of_work,
+        )
 
-    assert outcome.duplicate is False
-    assert outcome.transitioned is False
-    assert unit_of_work.commits == 1
-    assert outbox.appended[0].payload["completed_at"] == "2026-09-08T20:00:03.412Z"
+    assert raised.value.reason == "order_already_completed"
+    assert orders.completed == [ORDER_ID]
+    assert outbox.appended == []
+    assert unit_of_work.commits == 0
+
+
+def test_a_transition_without_completed_at_never_invents_one() -> None:
+    # ADR-007: despues de la guarda, transitioned implica completed_at; el camino queda cerrado
+    # de forma explicita para que ningun proceso vuelva a fabricar una marca de tiempo.
+    outbox = FakeOutbox()
+
+    with pytest.raises(OrderNotCompletedError):
+        run(
+            processed_events=FakeProcessedEvents(),
+            orders=FakeOrders(
+                OrderTransition(transitioned=True, completed_at=None, status="COMPLETED")
+            ),
+            outbox=outbox,
+            unit_of_work=FakeUnitOfWork(),
+        )
+
+    assert outbox.appended == []
 
 
 def test_the_dedup_reservation_carries_the_consumer_group() -> None:

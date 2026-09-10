@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, insert, select, update
 
-from app.domain.events import EventDraft, PendingEvent
+from app.domain.events import EventDraft, OutboxStats, PendingEvent
 from app.infra.models import OutboxEvent as OutboxRow
 from app.repositories.base import SQLAlchemyRepository
 from app.repositories.intervals import interval
@@ -27,6 +27,27 @@ class OutboxRepository(SQLAlchemyRepository):
             )
         )
         return event_id
+
+    async def stats(self) -> OutboxStats:
+        pending = OutboxRow.published_at.is_(None) & OutboxRow.failed_at.is_(None)
+        row = (
+            await self._session.execute(
+                select(
+                    func.count().filter(pending).label("pending"),
+                    func.count().filter(OutboxRow.published_at.is_not(None)).label("published"),
+                    func.count().filter(OutboxRow.failed_at.is_not(None)).label("failed"),
+                    func.extract(
+                        "epoch", func.now() - func.min(OutboxRow.occurred_at).filter(pending)
+                    ).label("oldest_pending_age_seconds"),
+                )
+            )
+        ).one()
+        return OutboxStats(
+            pending=row.pending,
+            published=row.published,
+            failed=row.failed,
+            oldest_pending_age_seconds=float(row.oldest_pending_age_seconds or 0.0),
+        )
 
     async def claim_pending(self, limit: int) -> list[PendingEvent]:
         rows = (

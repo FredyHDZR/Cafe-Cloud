@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     redis_url: RedisDsn = Field(alias="REDIS_URL")
     service_name: str = Field(alias="SERVICE_NAME", min_length=1)
     log_level: LogLevel = Field(alias="LOG_LEVEL")
+    health_probe_timeout_seconds: float = Field(
+        default=2.0, alias="HEALTH_PROBE_TIMEOUT_SECONDS", gt=0
+    )
     lock_timeout_ms: int = Field(default=3000, alias="DB_LOCK_TIMEOUT_MS", ge=0)
     idle_in_transaction_timeout_ms: int = Field(
         default=10_000, alias="DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", ge=0
@@ -60,6 +63,8 @@ class ConsumerSettings(Settings):
     janitor_min_idle_ms: int = Field(default=60_000, alias="JANITOR_MIN_IDLE_MS", gt=0)
     janitor_batch_size: int = Field(default=50, alias="JANITOR_BATCH_SIZE", gt=0)
     janitor_max_deliveries: int = Field(default=5, alias="JANITOR_MAX_DELIVERIES", gt=0)
+    http_host: str = Field(default="0.0.0.0", alias="HTTP_HOST", min_length=1)
+    http_port: int = Field(default=8000, alias="HTTP_PORT", gt=0, le=65535)
 
     @model_validator(mode="after")
     def _check_prep_range(self) -> "ConsumerSettings":

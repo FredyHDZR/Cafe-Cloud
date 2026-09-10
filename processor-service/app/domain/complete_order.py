@@ -4,10 +4,13 @@ from typing import Protocol
 from uuid import UUID
 
 from app.domain.envelope import OrderCreatedEnvelope
-from app.domain.errors import OrderNotCompletedError
+from app.domain.errors import (
+    NonRetryableError,
+    OrderAlreadyCompletedError,
+    OrderNotCompletedError,
+)
 from app.domain.events import EventDraft, order_completed_event
 from app.domain.order import OrderStatus, OrderTransition
-from app.domain.timestamps import utc_now
 from app.infra.logging import log_context
 
 logger = logging.getLogger(__name__)
@@ -73,14 +76,13 @@ class CompleteOrderService:
             return CompleteOutcome(duplicate=True)
 
         transition = await self._orders.complete(event.payload.order_id)
-        # ADR-006: sin fila en COMPLETED el evento seria una promesa, no un hecho.
-        if not transition.transitioned and transition.status != OrderStatus.COMPLETED.value:
-            message = (
-                f"el pedido {event.payload.order_id} no quedo COMPLETED: "
-                f"status={transition.status!r}"
-            )
+        # ADR-006 y ADR-007: solo emite quien de verdad llevo la fila de PENDING a COMPLETED.
+        if not transition.transitioned:
+            raise _rejection(event.payload.order_id, transition.status)
+        completed_at = transition.completed_at
+        if completed_at is None:
+            message = f"el pedido {event.payload.order_id} transiciono sin completed_at"
             raise OrderNotCompletedError(message)
-        completed_at = transition.completed_at or utc_now()
         outgoing = order_completed_event(
             event, completed_at=completed_at, processing_ms=processing_ms
         )
@@ -102,3 +104,11 @@ class CompleteOrderService:
             transitioned=transition.transitioned,
             outgoing_event_id=outgoing_event_id,
         )
+
+
+def _rejection(order_id: UUID, status: str | None) -> NonRetryableError:
+    if status == OrderStatus.COMPLETED.value:
+        message = f"el pedido {order_id} ya estaba COMPLETED antes de este evento"
+        return OrderAlreadyCompletedError(message)
+    message = f"el pedido {order_id} no quedo COMPLETED: status={status!r}"
+    return OrderNotCompletedError(message)
