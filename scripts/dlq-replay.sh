@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
 #
-# Reproceso manual de una dead letter queue (ADR-004). Lee las entradas de
-# <stream>.dlq, reinyecta el envelope integro en <stream> y borra la entrada de
-# la DLQ. Las DLQ no tienen consumidor automatico a proposito: esto lo dispara
-# una persona despues de mirar el motivo con XRANGE.
+# Reproceso manual de una dead letter queue (ADR-004): reinyecta el envelope integro de <stream>.dlq
+# en <stream>. Las DLQ no tienen consumidor automatico a proposito.
 #
-#   make dlq-replay STREAM=orders.created
-#   make dlq-replay STREAM=orders.completed LIMIT=10 KEEP=1
+#   STREAM=orders.created [LIMIT=100] [KEEP=1] scripts/dlq-replay.sh
 #
-# LIMIT  entradas como maximo por ejecucion (por defecto 100).
-# KEEP=1 deja la entrada en la DLQ en lugar de borrarla; reinyectar dos veces es
-#        inofensivo porque el consumidor deduplica por event_id, pero entonces la
-#        longitud de la DLQ deja de ser el trabajo pendiente.
+# KEEP=1 no borra la entrada de la DLQ; reinyectar dos veces es inofensivo porque el consumidor
+# deduplica por event_id, pero la longitud de la DLQ deja de ser el trabajo pendiente.
 #
-# Salida: 0 todo reinyectado, 1 error de Redis, 2 uso incorrecto, 3 lote
-# reinyectado con entradas omitidas por envelope ausente o ilegible.
+# Salida: 0 todo reinyectado, 1 error de Redis, 2 uso incorrecto, 3 con entradas omitidas.
 #
 set -euo pipefail
 

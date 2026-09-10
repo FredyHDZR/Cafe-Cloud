@@ -1,29 +1,20 @@
-# =============================================================================
-# Café Cloud — qué NO entra en el contexto de build de ninguna imagen
-# =============================================================================
-# En TICKET-001 todavía no hay Dockerfiles, pero el archivo se crea ya: cuando
-# aparezca el primer build, el contexto tiene que estar limpio desde el inicio,
-# y sobre todo tiene que ser imposible que un `.env` acabe dentro de una imagen.
+# Contexto de build de la raiz. Que un `.env` acabe dentro de una imagen tiene que ser imposible.
 
-# Git
 .git
 .gitignore
 .gitattributes
 
-# Secretos y configuración local. `.env.example` sí entra, es documentación.
+# `.env.example` si entra: es documentacion.
 .env
 .env.*
 !.env.example
 *.pem
 *.key
 
-# Base de contexto y configuración de las herramientas de desarrollo.
-# No se versionan y no pintan nada dentro de una imagen.
 .doc
 .claude
 CLAUDE.md
 
-# Artefactos de Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -39,7 +30,6 @@ env/
 ENV/
 poetry.toml
 
-# Caches de herramientas
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -49,8 +39,7 @@ htmlcov/
 coverage.xml
 .tox/
 
-# Infraestructura y datos locales: los scripts de init se montan como volumen,
-# no se copian a ninguna imagen de aplicación.
+# Los scripts de init se montan como volumen, no se copian a ninguna imagen.
 infra/
 docker-compose.yml
 docker-compose.override.yml
@@ -61,11 +50,9 @@ data/
 *.sqlite3
 dump.rdb
 
-# Logs
 *.log
 logs/
 
-# Editores y sistema operativo
 .vscode/
 .idea/
 *.swp

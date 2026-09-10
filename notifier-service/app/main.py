@@ -52,8 +52,7 @@ def health_service(settings: Settings, mongo: MongoDatabase, broker: RedisBroker
     return HealthService(
         [
             Dependency(name="mongo", probe=mongo.ping),
-            # Redis no es critica para esta API: quien lee el stream es notifier-consumer, y es
-            # su sonda la que lo declara critico (TICKET-009, decision 3).
+            # Redis no es critica para esta API: quien lee el stream es notifier-consumer.
             Dependency(name="redis", probe=broker.ping, critical=False),
         ],
         timeout_seconds=settings.health_probe_timeout_seconds,

@@ -366,8 +366,7 @@ async def main() -> None:
     )
     consumer = NotificationConsumer(settings=settings, mongo=mongo, stream=stream)
     janitor = StreamJanitor(settings=settings, stream=stream, consumer=consumer)
-    # La superficie HTTP vive en este proceso, no en el de la API: un contador solo lo puede
-    # servir quien lo incrementa (TICKET-009, decision 3).
+    # Un contador solo lo puede servir el proceso que lo incrementa.
     observability = create_observability_app(settings=settings, mongo=mongo, stream=stream)
     try:
         async with asyncio.TaskGroup() as tasks:

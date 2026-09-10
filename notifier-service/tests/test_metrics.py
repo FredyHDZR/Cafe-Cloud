@@ -71,8 +71,7 @@ def test_the_service_is_named_in_its_own_metrics(
 def test_the_consumer_role_publishes_the_counters_it_increments(
     client: TestClient, collector: FakeCollector
 ) -> None:
-    # La API no los publica porque no los mueve: son del proceso consumidor, que sirve su propio
-    # /metrics en otro contenedor (TICKET-009, decision 3).
+    # La API no los publica porque no los mueve: son del proceso consumidor.
     register_consumer_metrics("orders.completed")
     before = sample("cafecloud_notifications_inserted_total")
 

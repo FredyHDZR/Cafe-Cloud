@@ -17,7 +17,7 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 # Con search_path = processor, Postgres declara `processor` esquema por defecto y el autogenerate
-# de Alembic lo normaliza a None, con lo que no reconoce las tablas ya creadas. Ver TICKET-002.
+# de Alembic lo normaliza a None, con lo que no reconoce las tablas ya creadas.
 CONNECT_ARGS = {"server_settings": {"search_path": "public"}}
 
 

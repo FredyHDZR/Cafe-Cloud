@@ -1,38 +1,3 @@
-# =============================================================================
-# Café Cloud — automatización
-# =============================================================================
-#
-# Aquí solo hay objetivos que ejecutan algo de verdad. `seed` se añadirá en
-# TICKET-011, que es el ticket que trae los datos de ejemplo: un objetivo que no
-# hace nada es peor que su ausencia.
-#
-# `lint` y `test` no necesitan Python en la máquina: corren dentro de la etapa
-# `dev` de la imagen del servicio, que es donde viven ruff, mypy y pytest.
-#
-# Uso:
-#   make up                 levanta todo el entorno en segundo plano
-#   make build              construye las imágenes de los servicios
-#   make ps                 estado y salud de los contenedores
-#   make logs               sigue los logs de todos; make logs S=postgres, de uno
-#   make migrate            alembic upgrade head de las DOS cadenas, cada una en
-#                           un contenedor de un solo uso y con su propio rol
-#   make lint               ruff + mypy sobre los cuatro proyectos y las pruebas
-#                           de integración
-#   make test               unitarias + integración; las de integración exigen el
-#                           entorno levantado (`make up`)
-#   make test-unit          solo unitarias, sin entorno y sin red: ciclo rápido
-#   make test-integration   solo el flujo completo, dentro del Compose
-#   make psql               shell de psql sobre la base cafecloud
-#   make redis-cli          shell de redis-cli
-#   make dlq-inspect STREAM=orders.created   entradas de la DLQ de ese stream
-#   make dlq-replay  STREAM=orders.created   reinyecta la DLQ en su stream y la
-#                           vacía; LIMIT=n acota el lote y KEEP=1 no borra nada
-#   make mongosh            shell de mongosh sobre la base cafecloud
-#   make down               detiene y elimina los contenedores (los datos siguen)
-#   make down ARGS=-v       además borra los volúmenes
-#   make clean              contenedores, volúmenes e imágenes locales fuera
-# =============================================================================
-
 # Si existe .env, sus valores mandan sobre los de abajo (por eso van con ?=).
 -include .env
 
@@ -52,19 +17,40 @@ CLEANUP_DIR         ?= cleanup-job
 CLEANUP_DEV_IMAGE   ?= cafecloud/cleanup-job:dev
 INTEGRATION_IMAGE   ?= cafecloud/integration-tests:dev
 INTEGRATION_SERVICE ?= integration-tests
+SEED_SERVICE        ?= seed
 
-# Servicio opcional para `logs`; vacío significa todos.
-S    ?=
-# Argumentos extra para `down`, típicamente -v.
-ARGS ?=
-# Stream de los objetivos de DLQ, y ajustes del reproceso.
+S      ?=
+ARGS   ?=
 STREAM ?=
 LIMIT  ?= 100
 KEEP   ?= 0
 
-.PHONY: up build down clean ps logs migrate lint test test-unit test-integration \
+.DEFAULT_GOAL := help
+
+.PHONY: help up build down clean ps logs migrate seed lint test test-unit test-integration \
 	dev-images orders-dev-image processor-dev-image notifier-dev-image cleanup-dev-image \
 	integration-image psql redis-cli mongosh dlq-inspect dlq-replay
+
+help:
+	@echo 'Café Cloud'
+	@echo ''
+	@echo '  make up               levanta todo el entorno en segundo plano, construyendo lo que falte'
+	@echo '  make build            construye las imagenes sin arrancar nada'
+	@echo '  make ps               estado y salud de los contenedores'
+	@echo '  make logs             sigue los logs de todos; S=postgres sigue los de uno'
+	@echo '  make migrate          alembic upgrade head de las dos cadenas, cada una con su rol'
+	@echo '  make seed             crea pedidos de ejemplo por HTTP y espera sus notificaciones'
+	@echo '  make test             unitarias e integracion; las de integracion exigen el entorno'
+	@echo '  make test-unit        solo unitarias, sin entorno y sin red'
+	@echo '  make test-integration solo el flujo completo, dentro de la red del Compose'
+	@echo '  make lint             ruff y mypy sobre los cinco proyectos'
+	@echo '  make psql             shell de psql sobre la base cafecloud'
+	@echo '  make redis-cli        shell de redis-cli'
+	@echo '  make mongosh          shell de mongosh sobre la base cafecloud'
+	@echo '  make dlq-inspect STREAM=orders.created   entradas de esa dead letter queue'
+	@echo '  make dlq-replay  STREAM=orders.created   la reinyecta y la vacia; LIMIT=n, KEEP=1'
+	@echo '  make down             detiene y elimina los contenedores; ARGS=-v borra los datos'
+	@echo '  make clean            contenedores, volumenes e imagenes locales fuera'
 
 up:
 	$(COMPOSE) up -d --build
@@ -89,6 +75,10 @@ migrate:
 	$(COMPOSE) run --rm orders-migrate
 	$(COMPOSE) run --rm processor-migrate
 
+# `run` arrastra el depends_on, asi que levanta el entorno si esta caido.
+seed:
+	$(COMPOSE) run --rm $(SEED_SERVICE)
+
 orders-dev-image:
 	$(DOCKER) build --target dev -t $(ORDERS_DEV_IMAGE) $(ORDERS_DIR)
 
@@ -106,6 +96,7 @@ integration-image:
 
 dev-images: orders-dev-image processor-dev-image notifier-dev-image cleanup-dev-image
 
+# ruff, ruff format y mypy viven en la etapa `dev` de cada imagen: no hace falta Python en la maquina.
 lint: dev-images integration-image
 	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
 	$(DOCKER) run --rm $(PROCESSOR_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
@@ -121,7 +112,7 @@ test-unit: dev-images
 	$(DOCKER) run --rm $(NOTIFIER_DEV_IMAGE) pytest
 	$(DOCKER) run --rm $(CLEANUP_DEV_IMAGE) pytest
 
-# Las de integración corren dentro de la red del Compose contra los servicios vivos.
+# Corren dentro de la red del Compose, contra los servicios vivos.
 test-integration: integration-image
 	$(COMPOSE) run --rm $(INTEGRATION_SERVICE)
 
