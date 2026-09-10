@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 DEDUP_FIELD = "event_id"
 DEDUP_INDEX_KEY = [(DEDUP_FIELD, 1)]
+# Los 30 s por defecto de motor dejarian a cada intento del consumidor esperando media vida.
+DEFAULT_SERVER_SELECTION_TIMEOUT_MS = 5000
 
 Document = dict[str, Any]
 
@@ -27,8 +29,19 @@ class MissingDedupIndexError(RuntimeError):
 
 
 class MongoDatabase:
-    def __init__(self, dsn: str, *, database: str, collection: str) -> None:
-        self._client: AsyncIOMotorClient[Document] = AsyncIOMotorClient(dsn, tz_aware=True)
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        database: str,
+        collection: str,
+        server_selection_timeout_ms: int = DEFAULT_SERVER_SELECTION_TIMEOUT_MS,
+    ) -> None:
+        self._client: AsyncIOMotorClient[Document] = AsyncIOMotorClient(
+            dsn,
+            tz_aware=True,
+            serverSelectionTimeoutMS=server_selection_timeout_ms,
+        )
         self._database: AsyncIOMotorDatabase[Document] = self._client[database]
         self._collection_name = collection
 
@@ -38,6 +51,7 @@ class MongoDatabase:
             settings.mongo_dsn,
             database=settings.mongo_database,
             collection=settings.mongo_collection,
+            server_selection_timeout_ms=settings.mongo_server_selection_timeout_ms,
         )
 
     @property

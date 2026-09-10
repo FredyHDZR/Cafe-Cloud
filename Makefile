@@ -20,6 +20,9 @@
 #   make test               pytest sobre los tres servicios
 #   make psql               shell de psql sobre la base cafecloud
 #   make redis-cli          shell de redis-cli
+#   make dlq-inspect STREAM=orders.created   entradas de la DLQ de ese stream
+#   make dlq-replay  STREAM=orders.created   reinyecta la DLQ en su stream y la
+#                           vacía; LIMIT=n acota el lote y KEEP=1 no borra nada
 #   make mongosh            shell de mongosh sobre la base cafecloud
 #   make down               detiene y elimina los contenedores (los datos siguen)
 #   make down ARGS=-v       además borra los volúmenes
@@ -46,9 +49,13 @@ NOTIFIER_DEV_IMAGE  ?= cafecloud/notifier-service:dev
 S    ?=
 # Argumentos extra para `down`, típicamente -v.
 ARGS ?=
+# Stream de los objetivos de DLQ, y ajustes del reproceso.
+STREAM ?=
+LIMIT  ?= 100
+KEEP   ?= 0
 
 .PHONY: up build down clean ps logs migrate lint test dev-images orders-dev-image \
-	processor-dev-image notifier-dev-image psql redis-cli mongosh
+	processor-dev-image notifier-dev-image psql redis-cli mongosh dlq-inspect dlq-replay
 
 up:
 	$(COMPOSE) up -d --build
@@ -102,3 +109,9 @@ redis-cli:
 
 mongosh:
 	$(COMPOSE) exec mongo mongosh $(MONGO_DB)
+
+dlq-inspect:
+	$(COMPOSE) exec -T redis redis-cli XRANGE $(STREAM).dlq - +
+
+dlq-replay:
+	COMPOSE="$(COMPOSE)" STREAM="$(STREAM)" LIMIT="$(LIMIT)" KEEP="$(KEEP)" ./scripts/dlq-replay.sh
