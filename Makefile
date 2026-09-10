@@ -16,9 +16,12 @@
 #   make logs               sigue los logs de todos; make logs S=postgres, de uno
 #   make migrate            alembic upgrade head de las DOS cadenas, cada una en
 #                           un contenedor de un solo uso y con su propio rol
-#   make lint               ruff + mypy sobre los tres servicios y el cleanup-job
-#   make test               pytest sobre los tres servicios (el cleanup-job no
-#                           trae pruebas todavía: llegan en TICKET-010)
+#   make lint               ruff + mypy sobre los cuatro proyectos y las pruebas
+#                           de integración
+#   make test               unitarias + integración; las de integración exigen el
+#                           entorno levantado (`make up`)
+#   make test-unit          solo unitarias, sin entorno y sin red: ciclo rápido
+#   make test-integration   solo el flujo completo, dentro del Compose
 #   make psql               shell de psql sobre la base cafecloud
 #   make redis-cli          shell de redis-cli
 #   make dlq-inspect STREAM=orders.created   entradas de la DLQ de ese stream
@@ -47,6 +50,8 @@ NOTIFIER_DIR        ?= notifier-service
 NOTIFIER_DEV_IMAGE  ?= cafecloud/notifier-service:dev
 CLEANUP_DIR         ?= cleanup-job
 CLEANUP_DEV_IMAGE   ?= cafecloud/cleanup-job:dev
+INTEGRATION_IMAGE   ?= cafecloud/integration-tests:dev
+INTEGRATION_SERVICE ?= integration-tests
 
 # Servicio opcional para `logs`; vacío significa todos.
 S    ?=
@@ -57,9 +62,9 @@ STREAM ?=
 LIMIT  ?= 100
 KEEP   ?= 0
 
-.PHONY: up build down clean ps logs migrate lint test dev-images orders-dev-image \
-	processor-dev-image notifier-dev-image cleanup-dev-image psql redis-cli mongosh \
-	dlq-inspect dlq-replay
+.PHONY: up build down clean ps logs migrate lint test test-unit test-integration \
+	dev-images orders-dev-image processor-dev-image notifier-dev-image cleanup-dev-image \
+	integration-image psql redis-cli mongosh dlq-inspect dlq-replay
 
 up:
 	$(COMPOSE) up -d --build
@@ -72,7 +77,7 @@ down:
 
 clean:
 	$(COMPOSE) down --remove-orphans --volumes --rmi local
-	-$(DOCKER) image rm $(ORDERS_DEV_IMAGE) $(PROCESSOR_DEV_IMAGE) $(NOTIFIER_DEV_IMAGE) $(CLEANUP_DEV_IMAGE)
+	-$(DOCKER) image rm $(ORDERS_DEV_IMAGE) $(PROCESSOR_DEV_IMAGE) $(NOTIFIER_DEV_IMAGE) $(CLEANUP_DEV_IMAGE) $(INTEGRATION_IMAGE)
 
 ps:
 	$(COMPOSE) ps
@@ -96,18 +101,29 @@ notifier-dev-image:
 cleanup-dev-image:
 	$(DOCKER) build --target dev -t $(CLEANUP_DEV_IMAGE) $(CLEANUP_DIR)
 
+integration-image:
+	$(COMPOSE) build $(INTEGRATION_SERVICE)
+
 dev-images: orders-dev-image processor-dev-image notifier-dev-image cleanup-dev-image
 
-lint: dev-images
+lint: dev-images integration-image
 	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
 	$(DOCKER) run --rm $(PROCESSOR_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
 	$(DOCKER) run --rm $(NOTIFIER_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
 	$(DOCKER) run --rm $(CLEANUP_DEV_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
+	$(DOCKER) run --rm $(INTEGRATION_IMAGE) sh -c "ruff check . && ruff format --check . && mypy"
 
-test: dev-images
+test: test-unit test-integration
+
+test-unit: dev-images
 	$(DOCKER) run --rm $(ORDERS_DEV_IMAGE) pytest
 	$(DOCKER) run --rm $(PROCESSOR_DEV_IMAGE) pytest
 	$(DOCKER) run --rm $(NOTIFIER_DEV_IMAGE) pytest
+	$(DOCKER) run --rm $(CLEANUP_DEV_IMAGE) pytest
+
+# Las de integración corren dentro de la red del Compose contra los servicios vivos.
+test-integration: integration-image
+	$(COMPOSE) run --rm $(INTEGRATION_SERVICE)
 
 psql:
 	$(COMPOSE) exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)

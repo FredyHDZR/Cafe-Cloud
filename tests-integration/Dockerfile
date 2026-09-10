@@ -22,11 +22,17 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 
+# Este proyecto no tiene etapa `runtime`: no despliega nada, solo ejecuta pruebas.
 FROM builder AS dev
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+
+# redis-cli es lo que ejecuta scripts/dlq-replay.sh a traves del sustituto de bin/.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends redis-tools \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN /opt/venv/bin/pip install --no-cache-dir -r requirements-dev.txt
 
@@ -34,24 +40,3 @@ WORKDIR /app
 COPY . .
 
 CMD ["pytest"]
-
-
-FROM python:3.11-slim AS runtime
-
-ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
-
-RUN groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid app --home-dir /app --shell /usr/sbin/nologin app
-
-COPY --from=builder /opt/venv /opt/venv
-
-WORKDIR /app
-
-# El punto de entrada es un archivo en la raiz del proyecto, no un paquete `app/`.
-COPY --chown=app:app job.py ./job.py
-
-USER app
-
-CMD ["python", "job.py"]
