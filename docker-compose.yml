@@ -1,9 +1,8 @@
 # Café Cloud — infraestructura de datos (TICKET-001), `orders-service`
 # (TICKET-002), su publicador de outbox (TICKET-004), `processor-service`
-# (TICKET-005) y `notifier-service` (TICKET-006).
+# (TICKET-005), `notifier-service` (TICKET-006) y `cleanup-job` (TICKET-008).
 #
-# Los almacenes son Postgres, Redis y Mongo. El servicio de aplicación que
-# falta (cleanup-job) se añade en TICKET-008.
+# Los almacenes son Postgres, Redis y Mongo.
 #
 # Arranca sin configurar nada: todas las variables tienen valor por defecto de
 # desarrollo. Para cambiarlas, copiar `.env.example` a `.env` y editarlo.
@@ -368,6 +367,42 @@ services:
       redis:
         condition: service_healthy
     stop_grace_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # cleanup-job — borra cada minuto las notificaciones de más de 24 h
+  # (TICKET-008). ADR-005 renuncia al índice TTL de Mongo a propósito, así que
+  # el borrado es explícito y auditable: cada pasada deja una línea de log con
+  # su `deleted_count`, también cuando vale cero.
+  # Solo habla con Mongo: sin Postgres, sin Redis y sin puerto publicado.
+  # Sin healthcheck: no es un servicio HTTP y no expone `/health`. El modo de un
+  # solo disparo no sirve como sonda porque borra de verdad (TICKET-008,
+  # decisión 2); la salud se lee en `docker compose logs cleanup-job`.
+  # ---------------------------------------------------------------------------
+  cleanup-job:
+    build:
+      context: ./cleanup-job
+      dockerfile: Dockerfile
+      target: runtime
+    image: cafecloud/cleanup-job:0.1.0
+    container_name: cafecloud-cleanup-job
+    restart: unless-stopped
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: ${MONGO_DB:-cafecloud}
+      SERVICE_NAME: ${CLEANUP_SERVICE_NAME:-cleanup-job}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CLEANUP_INTERVAL_SECONDS: ${CLEANUP_INTERVAL_SECONDS:-60}
+      RETENTION_HOURS: ${RETENTION_HOURS:-24}
+      CLEANUP_RUN_ONCE: ${CLEANUP_RUN_ONCE:-false}
+    depends_on:
+      # El healthcheck de Mongo afirma sobre los índices del init, así que
+      # esperar a que esté sano es esperar a que exista `ix_notifications_created_at`,
+      # que es el índice del que vive el barrido (ADR-005).
+      mongo:
+        condition: service_healthy
+    # SIGTERM apaga el planificador esperando a la pasada en vuelo; el margen
+    # cubre un `delete_many` largo sobre una colección con mucho atraso.
+    stop_grace_period: 30s
 
 volumes:
   pgdata:

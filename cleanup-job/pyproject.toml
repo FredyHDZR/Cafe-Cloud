@@ -1,0 +1,45 @@
+[tool.poetry]
+name = "cleanup-job"
+version = "0.1.0"
+description = "Cafe Cloud - borrado de notificaciones caducadas"
+authors = ["Cafe Cloud"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+apscheduler = ">=3.10,<4.0"
+pymongo = ">=4.8,<5.0"
+pydantic-settings = "^2.5"
+
+[tool.poetry.group.dev.dependencies]
+ruff = ">=0.6,<1.0"
+mypy = ">=1.11,<3.0"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+# Sin "D" (pydocstyle) a proposito: TICKET-002 prohibe exigir docstring por sistema.
+select = ["E", "W", "F", "I", "N", "UP", "ANN", "ASYNC", "B", "C4", "SIM", "PT", "TID", "RUF"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+files = ["job.py"]
+
+# APScheduler 3.x no publica py.typed ni tiene stubs en typeshed.
+[[tool.mypy.overrides]]
+module = "apscheduler.*"
+ignore_missing_imports = true
