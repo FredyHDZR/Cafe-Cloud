@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -10,6 +10,8 @@ from app.infra.config import ConsumerSettings, PublisherSettings
 
 GROUP_EXISTS_PREFIX = "BUSYGROUP"
 NEW_MESSAGES = ">"
+CLAIM_START_ID = "0-0"
+PENDING_LOOKUP_COUNT = 1000
 
 
 class RedisEventStream:
@@ -47,6 +49,7 @@ class RedisStreamConsumer:
         consumer: str,
         block_ms: int,
         batch_size: int,
+        dlq_stream: str,
     ) -> None:
         self._client = client
         self._stream = stream
@@ -54,6 +57,7 @@ class RedisStreamConsumer:
         self._consumer = consumer
         self._block_ms = block_ms
         self._batch_size = batch_size
+        self._dlq_stream = dlq_stream
 
     @classmethod
     def from_settings(cls, settings: ConsumerSettings) -> "RedisStreamConsumer":
@@ -65,6 +69,7 @@ class RedisStreamConsumer:
             consumer=settings.resolved_consumer_name,
             block_ms=settings.block_ms,
             batch_size=settings.batch_size,
+            dlq_stream=settings.resolved_dlq_stream,
         )
 
     @property
@@ -78,6 +83,10 @@ class RedisStreamConsumer:
     @property
     def consumer(self) -> str:
         return self._consumer
+
+    @property
+    def dlq_stream(self) -> str:
+        return self._dlq_stream
 
     async def ensure_group(self) -> bool:
         try:
@@ -98,6 +107,36 @@ class RedisStreamConsumer:
         )
         return _to_messages(response)
 
+    async def autoclaim(self, *, min_idle_ms: int, count: int) -> list[StreamMessage]:
+        response = await self._client.xautoclaim(
+            self._stream,
+            self._group,
+            self._consumer,
+            min_idle_ms,
+            start_id=CLAIM_START_ID,
+            count=count,
+        )
+        return _to_claimed(response)
+
+    async def delivery_counts(self, entry_ids: Sequence[str]) -> dict[str, int]:
+        if not entry_ids:
+            return {}
+        pending = await self._client.xpending_range(
+            self._stream,
+            self._group,
+            min=entry_ids[0],
+            max=entry_ids[-1],
+            count=PENDING_LOOKUP_COUNT,
+            consumername=self._consumer,
+        )
+        return {str(item["message_id"]): int(item["times_delivered"]) for item in pending}
+
+    async def dead_letter(self, fields: Mapping[str, str]) -> str:
+        entry = cast(dict[FieldT, EncodableT], dict(fields))
+        # Sin MAXLEN: recortar la DLQ seria tirar lo que se guarda justo para no perderlo.
+        entry_id = await self._client.xadd(self._dlq_stream, entry)
+        return str(entry_id)
+
     async def ack(self, entry_id: str) -> None:
         await self._client.xack(self._stream, self._group, entry_id)
 
@@ -115,3 +154,13 @@ def _to_messages(response: Any) -> list[StreamMessage]:
             for entry_id, fields in entries
         )
     return messages
+
+
+def _to_claimed(response: Any) -> list[StreamMessage]:
+    if not response or len(response) < 2:
+        return []
+    return [
+        StreamMessage(entry_id=str(entry_id), fields=dict(fields))
+        for entry_id, fields in response[1]
+        if fields
+    ]
