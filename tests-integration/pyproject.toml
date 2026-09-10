@@ -1,15 +1,16 @@
 [tool.poetry]
-name = "cleanup-job"
+name = "integration-tests"
 version = "0.1.0"
-description = "Cafe Cloud - borrado de notificaciones caducadas"
+description = "Cafe Cloud - pruebas de integracion del flujo completo"
 authors = ["Cafe Cloud"]
 package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.11"
-apscheduler = ">=3.10,<4.0"
+httpx = ">=0.27,<1.0"
+psycopg = { extras = ["binary"], version = "^3.2" }
 pymongo = ">=4.8,<5.0"
-pydantic-settings = "^2.5"
+redis = ">=5.0,<7.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0,<10.0"
@@ -26,12 +27,11 @@ line-length = 100
 src = ["."]
 
 [tool.ruff.lint]
-# Sin "D" (pydocstyle) a proposito: TICKET-002 prohibe exigir docstring por sistema.
 select = ["E", "W", "F", "I", "N", "UP", "ANN", "ASYNC", "B", "C4", "SIM", "PT", "TID", "RUF"]
 ignore = ["ANN401"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["job"]
+known-first-party = ["tests"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
@@ -40,16 +40,10 @@ ban-relative-imports = "all"
 python_version = "3.11"
 strict = true
 warn_unreachable = true
-plugins = ["pydantic.mypy"]
-files = ["job.py", "tests"]
-
-# APScheduler 3.x no publica py.typed ni tiene stubs en typeshed.
-[[tool.mypy.overrides]]
-module = "apscheduler.*"
-ignore_missing_imports = true
+files = ["tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-# job.py vive en la raiz del proyecto, no en un paquete importable desde tests/.
-pythonpath = ["."]
+# El codigo se monta de solo lectura desde el Compose.
+cache_dir = "/tmp/pytest_cache"

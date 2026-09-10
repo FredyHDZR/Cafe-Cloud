@@ -479,6 +479,46 @@ services:
     # cubre un `delete_many` largo sobre una colección con mucho atraso.
     stop_grace_period: 30s
 
+  integration-tests:
+    # `profiles` lo deja fuera de `docker compose up`: es un contenedor de un solo uso
+    # que arranca `make test-integration` con `run --rm`.
+    profiles: ["test"]
+    build:
+      context: ./tests-integration
+      dockerfile: Dockerfile
+      target: dev
+    image: cafecloud/integration-tests:dev
+    restart: "no"
+    environment:
+      ORDERS_URL: http://orders-service:8000
+      PROCESSOR_URL: http://processor-service:8000
+      NOTIFIER_URL: http://notifier-service:8000
+      NOTIFIER_CONSUMER_URL: http://notifier-consumer:8000
+      # Las pruebas leen los dos esquemas y borran lo que escriben, así que van con el
+      # superusuario: ningún rol de servicio puede cruzar de `orders` a `processor`.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-cafecloud}
+      REDIS_URL: redis://redis:6379/${ORDERS_REDIS_DB:-0}
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: ${MONGO_DB:-cafecloud}
+      READY_TIMEOUT_SECONDS: ${INTEGRATION_READY_TIMEOUT_SECONDS:-90}
+      FLOW_TIMEOUT_SECONDS: ${INTEGRATION_FLOW_TIMEOUT_SECONDS:-45}
+      DLQ_REPLAY_SCRIPT: /opt/scripts/dlq-replay.sh
+      COMPOSE_SHIM: /app/bin/compose-shim
+    volumes:
+      - ./tests-integration:/app:ro
+      - ./scripts:/opt/scripts:ro
+    depends_on:
+      # La puerta por sanidad solo garantiza procesos vivos; la preparación la sondea
+      # la propia suite contra /health/ready antes de la primera prueba.
+      orders-service:
+        condition: service_healthy
+      processor-service:
+        condition: service_healthy
+      notifier-service:
+        condition: service_healthy
+      notifier-consumer:
+        condition: service_healthy
+
 volumes:
   pgdata:
   redisdata:
