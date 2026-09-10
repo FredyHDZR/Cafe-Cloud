@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Poetry: se versiona poetry.lock, no los artefactos locales
+poetry.toml
+
+# Configuración y credenciales
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Caches de herramientas
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+
+# Datos locales de servicios
+data/
+*.db
+*.sqlite
+*.sqlite3
+dump.rdb
+
+# Logs
+*.log
+logs/
+
+# Docker
+docker-compose.override.yml
+
+# Editores
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# CLaude
+
+CLAUDE.md

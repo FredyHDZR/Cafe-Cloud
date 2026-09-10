@@ -1,0 +1,413 @@
+# Café Cloud — entorno completo: los tres almacenes, los cuatro componentes y las migraciones.
+#
+# Arranca sin configurar nada: todas las variables tienen valor por defecto de desarrollo. Para
+# cambiarlas, copiar `.env.example` a `.env` y editarlo.
+#
+#   docker compose up -d --build
+#
+# Los `healthcheck` de los procesos HTTP miran `/health/live`, la vitalidad, no la preparacion: un
+# healthcheck responde a "¿hay que reiniciar este contenedor?" y contagiar la caida de un almacen al
+# vecino sano repite el aviso y bloquea a quien dependa de el por `condition: service_healthy`. La
+# preparacion se lee en `/health` y `/health/ready`, que devuelven 503.
+#
+name: cafecloud
+
+x-orders-image: &orders-image
+  build:
+    context: ./orders-service
+    dockerfile: Dockerfile
+    target: runtime
+  image: cafecloud/orders-service:0.1.0
+
+x-processor-image: &processor-image
+  build:
+    context: ./processor-service
+    dockerfile: Dockerfile
+    target: runtime
+  image: cafecloud/processor-service:0.1.0
+
+x-processor-env: &processor-env
+  # Rol propio: el limite de ADR-006 sobre `orders.orders` lo impone Postgres, no el codigo.
+  DATABASE_URL: postgresql+asyncpg://${PROCESSOR_DB_USER:-processor_rw}:${PROCESSOR_DB_PASSWORD:-processor_dev_pw}@postgres:5432/${POSTGRES_DB:-cafecloud}
+  REDIS_URL: redis://redis:6379/${PROCESSOR_REDIS_DB:-0}
+  SERVICE_NAME: ${PROCESSOR_SERVICE_NAME:-processor-service}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  HEALTH_PROBE_TIMEOUT_SECONDS: ${HEALTH_PROBE_TIMEOUT_SECONDS:-2}
+
+x-notifier-image: &notifier-image
+  build:
+    context: ./notifier-service
+    dockerfile: Dockerfile
+    target: runtime
+  image: cafecloud/notifier-service:0.1.0
+
+x-notifier-env: &notifier-env
+  # Nodo unico sin autenticacion, asi que la cadena no lleva credenciales.
+  MONGO_URL: mongodb://mongo:27017
+  MONGO_DB: ${MONGO_DB:-cafecloud}
+  REDIS_URL: redis://redis:6379/${NOTIFIER_REDIS_DB:-0}
+  SERVICE_NAME: ${NOTIFIER_SERVICE_NAME:-notifier-service}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  HEALTH_PROBE_TIMEOUT_SECONDS: ${HEALTH_PROBE_TIMEOUT_SECONDS:-2}
+
+x-orders-env: &orders-env
+  # Rol de aplicacion, nunca el superusuario (ADR-006).
+  DATABASE_URL: postgresql+asyncpg://${ORDERS_DB_USER:-orders_rw}:${ORDERS_DB_PASSWORD:-orders_dev_pw}@postgres:5432/${POSTGRES_DB:-cafecloud}
+  REDIS_URL: redis://redis:6379/${ORDERS_REDIS_DB:-0}
+  SERVICE_NAME: ${ORDERS_SERVICE_NAME:-orders-service}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  HEALTH_PROBE_TIMEOUT_SECONDS: ${HEALTH_PROBE_TIMEOUT_SECONDS:-2}
+  # La migracion 0001 concede sobre este rol; si se cambia el nombre, el GRANT lo sigue.
+  PROCESSOR_DB_USER: ${PROCESSOR_DB_USER:-processor_rw}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cafecloud-postgres
+    restart: unless-stopped
+    environment:
+      # Superusuario del contenedor. Las aplicaciones no lo usan: cada una entra con su rol.
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-cafecloud}
+      # El script de init las lee con `\getenv`: ninguna contraseña queda escrita en el SQL.
+      ORDERS_DB_USER: ${ORDERS_DB_USER:-orders_rw}
+      ORDERS_DB_PASSWORD: ${ORDERS_DB_PASSWORD:-orders_dev_pw}
+      PROCESSOR_DB_USER: ${PROCESSOR_DB_USER:-processor_rw}
+      PROCESSOR_DB_PASSWORD: ${PROCESSOR_DB_PASSWORD:-processor_dev_pw}
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # `-h 127.0.0.1` obliga a comprobar el puerto TCP: durante el init el entrypoint levanta un
+      # servidor temporal que solo escucha en el socket Unix y daria `healthy` demasiado pronto.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+      # Todo el arranque cuelga de esta sonda, asi que durante el init se pregunta mas a menudo.
+      start_interval: 2s
+
+  redis:
+    image: redis:7-alpine
+    container_name: cafecloud-redis
+    restart: unless-stopped
+    # AOF obligatorio: sin el, un reinicio se lleva los streams y la Pending Entries List (ADR-001).
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli PING | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+      start_interval: 2s
+
+  mongo:
+    image: mongo:7
+    container_name: cafecloud-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-cafecloud}
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongodata:/data/db
+      - ./infra/mongo/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Un ping responderia contra el `mongod` temporal del init, con la coleccion aun sin crear, y
+      # notifier-service se niega a arrancar sin el indice unico. Se afirma sobre los indices reales.
+      test:
+        - CMD-SHELL
+        - 'mongosh "$$MONGO_INITDB_DATABASE" --quiet --eval "db.notifications.getIndexes().length >= 4" | grep -q true'
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+      start_interval: 2s
+
+  # Corre con el rol dueño del esquema: si migrara el superusuario, las tablas no serian de
+  # `orders_rw` y haria falta un GRANT por tabla y secuencia (ADR-006).
+  orders-migrate:
+    <<: *orders-image
+    container_name: cafecloud-orders-migrate
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *orders-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  orders-service:
+    <<: *orders-image
+    container_name: cafecloud-orders-service
+    restart: unless-stopped
+    environment:
+      <<: *orders-env
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${ORDERS_SERVICE_PORT:-8001}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      orders-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Sin `curl` en la imagen final: se sondea con el interprete que ya esta dentro.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      # Generoso a proposito: solo retrasa el veredicto de `unhealthy` en un arranque lento.
+      start_period: 30s
+      start_interval: 2s
+
+  orders-outbox-publisher:
+    <<: *orders-image
+    container_name: cafecloud-orders-outbox-publisher
+    restart: unless-stopped
+    command: ["python", "-m", "app.publisher"]
+    environment:
+      <<: *orders-env
+      SERVICE_NAME: ${ORDERS_PUBLISHER_SERVICE_NAME:-orders-outbox-publisher}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      orders-migrate:
+        condition: service_completed_successfully
+    # Una sola replica: el orden global del stream solo se conserva con un unico publicador, porque
+    # el `FOR UPDATE SKIP LOCKED` reparte las filas (ADR-002). El `container_name` lo garantiza,
+    # porque con el Compose se niega a escalar el servicio.
+    deploy:
+      replicas: 1
+    # Sin `healthcheck`: no sirve HTTP y su unico estado esta en la tabla `outbox`, asi que su
+    # sintoma lo publica el hermano en `cafecloud_outbox_oldest_pending_age_seconds` del 8001.
+    #
+    # El margen cubre un ciclo con un lote completo por publicar.
+    stop_grace_period: 15s
+
+  # Cadena de Alembic propia y rol propio: `processor_rw` es el dueño de su esquema (ADR-006).
+  processor-migrate:
+    <<: *processor-image
+    container_name: cafecloud-processor-migrate
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *processor-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  processor-service:
+    <<: *processor-image
+    container_name: cafecloud-processor-service
+    restart: unless-stopped
+    command: ["python", "-m", "app.consumer"]
+    environment:
+      <<: *processor-env
+      HTTP_PORT: "8000"
+    # El proceso consumidor sirve tambien `/health` y `/metrics`: un contador solo lo puede exponer
+    # quien lo incrementa, y sin puerto publicado habria que ir a buscarlo con `exec`.
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${PROCESSOR_SERVICE_PORT:-8002}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      processor-migrate:
+        condition: service_completed_successfully
+      # Los GRANT de ADR-006 sobre `orders.orders` se conceden dentro de la migracion 0001 de
+      # orders-service: sin ella este servicio arrancaria sin permiso para completar nada.
+      orders-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+    stop_grace_period: 15s
+
+  processor-outbox-publisher:
+    <<: *processor-image
+    container_name: cafecloud-processor-outbox-publisher
+    restart: unless-stopped
+    command: ["python", "-m", "app.publisher"]
+    environment:
+      <<: *processor-env
+      SERVICE_NAME: ${PROCESSOR_PUBLISHER_SERVICE_NAME:-processor-outbox-publisher}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      processor-migrate:
+        condition: service_completed_successfully
+    # Una sola replica, por el mismo motivo que el publicador de orders-service (ADR-002).
+    deploy:
+      replicas: 1
+    # Sin `healthcheck`: su sintoma es `cafecloud_outbox_oldest_pending_age_seconds`, aqui en el 8002.
+    stop_grace_period: 15s
+
+  notifier-service:
+    <<: *notifier-image
+    container_name: cafecloud-notifier-service
+    restart: unless-stopped
+    environment:
+      <<: *notifier-env
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${NOTIFIER_SERVICE_PORT:-8003}:8000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+
+  notifier-consumer:
+    <<: *notifier-image
+    container_name: cafecloud-notifier-consumer
+    restart: unless-stopped
+    command: ["python", "-m", "app.consumer"]
+    environment:
+      <<: *notifier-env
+      SERVICE_NAME: ${NOTIFIER_CONSUMER_SERVICE_NAME:-notifier-consumer}
+      HTTP_PORT: "8000"
+    # Puerto propio: los contadores de consumo viven en este proceso, no en el de la API.
+    ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${NOTIFIER_CONSUMER_PORT:-8004}:8000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      # Cubre lo que este proceso hace antes de escuchar: comprobar el indice unico y crear el grupo.
+      start_period: 30s
+      start_interval: 2s
+    stop_grace_period: 15s
+
+  # Sin `healthcheck`: el job es el PID 1 de su contenedor, asi que su vida ya la dice
+  # `docker compose ps`, y su paralisis se ve en `cafecloud_notifications_oldest_age_seconds`.
+  cleanup-job:
+    build:
+      context: ./cleanup-job
+      dockerfile: Dockerfile
+      target: runtime
+    image: cafecloud/cleanup-job:0.1.0
+    container_name: cafecloud-cleanup-job
+    restart: unless-stopped
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: ${MONGO_DB:-cafecloud}
+      SERVICE_NAME: ${CLEANUP_SERVICE_NAME:-cleanup-job}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CLEANUP_INTERVAL_SECONDS: ${CLEANUP_INTERVAL_SECONDS:-60}
+      RETENTION_HOURS: ${RETENTION_HOURS:-24}
+      CLEANUP_RUN_ONCE: ${CLEANUP_RUN_ONCE:-false}
+    depends_on:
+      # El healthcheck de Mongo afirma sobre los indices, asi que esperar a que este sano es esperar
+      # a que exista `ix_notifications_created_at`, del que vive el barrido (ADR-005).
+      mongo:
+        condition: service_healthy
+    # La unidad de trabajo es un `delete_many` entero, no un mensaje: el margen es mayor.
+    stop_grace_period: 30s
+
+  # `profiles` lo deja fuera de `docker compose up`: lo arranca `make seed`. Reusa la imagen de
+  # orders-service porque el script solo necesita el interprete y la biblioteca estandar.
+  seed:
+    <<: *orders-image
+    profiles: ["seed"]
+    restart: "no"
+    command: ["python", "/opt/scripts/seed.py"]
+    environment:
+      ORDERS_URL: http://orders-service:8000
+      NOTIFIER_URL: http://notifier-service:8000
+      SEED_CUSTOMER_ID: ${SEED_CUSTOMER_ID:-cafe-demo}
+      SEED_ORDERS: ${SEED_ORDERS:-3}
+      SEED_TIMEOUT_SECONDS: ${SEED_TIMEOUT_SECONDS:-60}
+    volumes:
+      - ./scripts:/opt/scripts:ro
+    depends_on:
+      orders-service:
+        condition: service_healthy
+      notifier-service:
+        condition: service_healthy
+
+  integration-tests:
+    # `profiles` lo deja fuera de `docker compose up`: lo arranca `make test-integration`.
+    profiles: ["test"]
+    build:
+      context: ./tests-integration
+      dockerfile: Dockerfile
+      target: dev
+    image: cafecloud/integration-tests:dev
+    restart: "no"
+    environment:
+      ORDERS_URL: http://orders-service:8000
+      PROCESSOR_URL: http://processor-service:8000
+      NOTIFIER_URL: http://notifier-service:8000
+      NOTIFIER_CONSUMER_URL: http://notifier-consumer:8000
+      # Las pruebas leen los dos esquemas y ningun rol de servicio puede cruzar de uno al otro.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-cafecloud}
+      REDIS_URL: redis://redis:6379/${ORDERS_REDIS_DB:-0}
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: ${MONGO_DB:-cafecloud}
+      READY_TIMEOUT_SECONDS: ${INTEGRATION_READY_TIMEOUT_SECONDS:-90}
+      FLOW_TIMEOUT_SECONDS: ${INTEGRATION_FLOW_TIMEOUT_SECONDS:-45}
+      DLQ_REPLAY_SCRIPT: /opt/scripts/dlq-replay.sh
+      COMPOSE_SHIM: /app/bin/compose-shim
+    volumes:
+      - ./tests-integration:/app:ro
+      - ./scripts:/opt/scripts:ro
+    depends_on:
+      # La puerta por sanidad solo garantiza procesos vivos; la preparacion la sondea la suite.
+      orders-service:
+        condition: service_healthy
+      processor-service:
+        condition: service_healthy
+      notifier-service:
+        condition: service_healthy
+      notifier-consumer:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  mongodata:

@@ -1,0 +1,25 @@
+# Contexto de build de tests-integration. Docker lee el .dockerignore del directorio
+# de contexto, y el de la raiz no aplica aqui.
+
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+poetry.toml
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+*.log
+.vscode/
+.idea/
+*.swp
+.DS_Store

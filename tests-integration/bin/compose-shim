@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# El contenedor de pruebas habla con Redis por red y no tiene socket de Docker, asi que
+# scripts/dlq-replay.sh corre con COMPOSE apuntando aqui: esto traduce
+# `exec -T <servicio> redis-cli ARGS` en `redis-cli -u $REDIS_URL ARGS`.
+set -eu
+
+if [ "${1:-}" != "exec" ]; then
+  echo "compose-shim: solo traduce 'exec'" >&2
+  exit 2
+fi
+shift
+
+if [ "${1:-}" = "-T" ]; then
+  shift
+fi
+
+shift
+
+command="$1"
+shift
+exec "$command" -u "$REDIS_URL" "$@"
