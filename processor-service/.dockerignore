@@ -1,5 +1,5 @@
-# Contexto de build de orders-service. El .dockerignore de la raiz no aplica aqui:
-# Docker lee el del directorio de contexto, y el contexto de este servicio es ./orders-service.
+# Contexto de build de processor-service. El .dockerignore de la raiz no aplica aqui:
+# Docker lee el del directorio de contexto, y el contexto de este servicio es ./processor-service.
 
 .env
 .env.*

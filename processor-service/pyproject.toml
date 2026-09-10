@@ -32,7 +32,7 @@ line-length = 100
 src = ["."]
 
 [tool.ruff.lint]
-# Sin "D" (pydocstyle) a proposito: TICKET-002 prohibe exigir docstring por sistema.
+# Sin "D" (pydocstyle) a proposito: no se exige docstring por sistema.
 select = ["E", "W", "F", "I", "N", "UP", "ANN", "ASYNC", "B", "C4", "SIM", "PT", "TID", "RUF"]
 ignore = ["ANN401"]
 

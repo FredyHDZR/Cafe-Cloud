@@ -21,7 +21,7 @@ class MissingDedupIndexError(RuntimeError):
     def __init__(self, namespace: str) -> None:
         message = (
             f"{namespace} no tiene indice unico sobre {DEDUP_FIELD}: sin el, la entrega "
-            "at-least-once duplicaria notificaciones. Lo crea el init de Mongo (TICKET-001), "
+            "at-least-once duplicaria notificaciones. Lo crea el init de Mongo, "
             "no este servicio; si falta, recrear el volumen con docker compose down -v."
         )
         super().__init__(message)

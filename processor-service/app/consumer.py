@@ -373,8 +373,7 @@ async def main() -> None:
     )
     consumer = OrderConsumer(settings=settings, database=database, stream=stream)
     janitor = StreamJanitor(settings=settings, stream=stream, consumer=consumer)
-    # La superficie HTTP vive en este proceso, no en un contenedor aparte: un contador solo lo
-    # puede servir quien lo incrementa (TICKET-009, decision 2).
+    # Un contador solo lo puede servir el proceso que lo incrementa.
     observability = create_observability_app(settings=settings, database=database, stream=stream)
     try:
         async with asyncio.TaskGroup() as tasks:

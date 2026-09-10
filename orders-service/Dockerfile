@@ -56,10 +56,6 @@ COPY --chown=app:app app ./app
 
 USER app
 
-# Sin `EXPOSE`: esta imagen corre tres procesos —la API, las migraciones y el
-# publicador de outbox— y solo uno escucha, así que declararlo en la imagen hacía
-# que `docker compose ps` anunciara un 8000/tcp inexistente en los otros dos. El
-# puerto lo declara el servicio del Compose, que es quien sabe qué proceso corre
-# (TICKET-009, decisión 13).
+# Sin `EXPOSE`: de los tres procesos de esta imagen solo la API escucha; el puerto lo declara el Compose.
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
