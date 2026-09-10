@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     mongo_server_selection_timeout_ms: int = Field(
         default=5000, alias="MONGO_SERVER_SELECTION_TIMEOUT_MS", gt=0
     )
+    health_probe_timeout_seconds: float = Field(
+        default=2.0, alias="HEALTH_PROBE_TIMEOUT_SECONDS", gt=0
+    )
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -59,6 +62,8 @@ class ConsumerSettings(Settings):
     janitor_min_idle_ms: int = Field(default=60_000, alias="JANITOR_MIN_IDLE_MS", gt=0)
     janitor_batch_size: int = Field(default=50, alias="JANITOR_BATCH_SIZE", gt=0)
     janitor_max_deliveries: int = Field(default=5, alias="JANITOR_MAX_DELIVERIES", gt=0)
+    http_host: str = Field(default="0.0.0.0", alias="HTTP_HOST", min_length=1)
+    http_port: int = Field(default=8000, alias="HTTP_PORT", gt=0, le=65535)
 
     @model_validator(mode="after")
     def _check_jitter_range(self) -> "ConsumerSettings":

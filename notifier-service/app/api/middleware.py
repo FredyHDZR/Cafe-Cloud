@@ -6,9 +6,12 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.infra.logging import log_context
+from app.infra.metrics import HTTP_DURATION, HTTP_REQUESTS
 from app.infra.tracing import TRACE_ID_HEADER, bind_trace_id, ensure_trace_id, reset_trace_id
 
 logger = logging.getLogger("app.request")
+
+UNMATCHED_PATH = "unmatched"
 
 
 class TraceIdMiddleware:
@@ -58,12 +61,19 @@ class RequestLogMiddleware:
         try:
             await self._app(scope, receive, send_with_status)
         finally:
+            elapsed = perf_counter() - started_at
+            method = str(scope.get("method", ""))
+            # La etiqueta es la plantilla de la ruta, no la URL: /notifications/{customer_id}
+            # tiene una serie, y /notifications/<cliente> tendria una por cliente.
+            template = getattr(scope.get("route"), "path", UNMATCHED_PATH)
+            HTTP_REQUESTS.labels(method=method, path=template, status=str(status_code)).inc()
+            HTTP_DURATION.labels(method=method, path=template).observe(elapsed)
             logger.info(
                 "http_request",
                 extra=log_context(
                     method=scope.get("method"),
                     path=scope.get("path"),
                     status_code=status_code,
-                    duration_ms=round((perf_counter() - started_at) * 1000, 2),
+                    duration_ms=round(elapsed * 1000, 2),
                 ),
             )

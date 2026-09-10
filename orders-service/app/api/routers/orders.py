@@ -10,6 +10,7 @@ from app.api.schemas.errors import ErrorResponse
 from app.api.schemas.orders import CreateOrderRequest, OrderResponse
 from app.domain.create_order import CreateOrderCommand
 from app.domain.errors import OrderNotFoundError
+from app.infra.metrics import IDEMPOTENCY_REPLAYS, ORDERS_CREATED
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -39,6 +40,10 @@ async def create_order(
             order=payload.to_domain(),
         )
     )
+    if result.replayed:
+        IDEMPOTENCY_REPLAYS.inc()
+    else:
+        ORDERS_CREATED.inc()
     headers = {IDEMPOTENCY_REPLAYED_HEADER: "true"} if result.replayed else None
     return JSONResponse(status_code=result.status_code, content=result.body, headers=headers)
 

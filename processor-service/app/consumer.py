@@ -5,6 +5,7 @@ import signal
 import time
 from contextlib import suppress
 
+from app.api.observability import create_observability_app, serve
 from app.domain.complete_order import CompleteOrderService, CompleteOutcome
 from app.domain.dead_letter import DeadLetter
 from app.domain.envelope import OrderCreatedEnvelope, parse_order_created
@@ -15,6 +16,16 @@ from app.domain.timestamps import to_rfc3339, utc_now
 from app.infra.config import ConsumerSettings, get_consumer_settings
 from app.infra.database import Database
 from app.infra.logging import configure_logging, log_context
+from app.infra.metrics import (
+    ACK_FAILURES,
+    DEAD_LETTERS,
+    EVENT_PROCESSING_DURATION,
+    EVENT_RETRIES,
+    EVENTS_CONSUMED,
+    MESSAGES_CLAIMED,
+    ORDER_PREPARATION_DURATION,
+    initialise,
+)
 from app.infra.streams import RedisStreamConsumer, StreamMessage
 from app.infra.tracing import trace_id_scope
 from app.repositories.orders import OrdersRepository
@@ -73,7 +84,10 @@ class OrderConsumer:
     ) -> None:
         self._inflight.add(message.entry_id)
         try:
-            with trace_id_scope(message.fields.get("trace_id")):
+            with (
+                trace_id_scope(message.fields.get("trace_id")),
+                EVENT_PROCESSING_DURATION.labels(stream=self._stream.stream).time(),
+            ):
                 await self._dispatch(message, stop=stop, delivery_count=delivery_count)
         finally:
             self._inflight.discard(message.entry_id)
@@ -123,6 +137,7 @@ class OrderConsumer:
                 first_failed_at = first_failed_at or to_rfc3339(utc_now())
                 if failure.retryable and not self._policy.is_last(attempt):
                     delay = self._policy.delay_for(attempt)
+                    EVENT_RETRIES.labels(stream=self._stream.stream, reason=failure.reason).inc()
                     logger.warning(
                         "event_retry_scheduled",
                         extra=log_context(
@@ -157,6 +172,10 @@ class OrderConsumer:
                     context=context,
                 )
                 return
+            EVENTS_CONSUMED.labels(
+                stream=self._stream.stream,
+                result="duplicate" if outcome.duplicate else "processed",
+            ).inc()
             if await self._ack(message, context=context):
                 logger.info(
                     "event_acked",
@@ -202,6 +221,7 @@ class OrderConsumer:
                 ),
             )
             return
+        DEAD_LETTERS.labels(stream=self._stream.stream, reason=failure.reason).inc()
         logger.error(
             "event_dead_lettered",
             extra=log_context(
@@ -221,6 +241,7 @@ class OrderConsumer:
         try:
             await self._stream.ack(message.entry_id)
         except Exception as error:
+            ACK_FAILURES.labels(stream=self._stream.stream).inc()
             # El efecto ya esta confirmado: sin XACK se reentrega y la deduplicacion lo absorbe.
             logger.error(
                 "event_ack_failed",
@@ -233,7 +254,9 @@ class OrderConsumer:
         seconds = random.uniform(self._settings.prep_min_seconds, self._settings.prep_max_seconds)
         started = time.monotonic()
         await asyncio.sleep(seconds)
-        return round((time.monotonic() - started) * MILLISECONDS)
+        elapsed = time.monotonic() - started
+        ORDER_PREPARATION_DURATION.observe(elapsed)
+        return round(elapsed * MILLISECONDS)
 
     async def _complete(self, event: OrderCreatedEnvelope, processing_ms: int) -> CompleteOutcome:
         async with self._database.session() as session:
@@ -296,6 +319,7 @@ class StreamJanitor:
                 # El propio proceso lo esta trabajando: reclamarselo a si mismo seria duplicarlo.
                 logger.debug("message_claim_skipped", extra=context)
                 return
+            MESSAGES_CLAIMED.labels(stream=self._stream.stream).inc()
             logger.warning("message_claimed", extra=context)
             if delivery_count > self._settings.janitor_max_deliveries:
                 await self._consumer.exhaust(message, delivery_count=delivery_count)
@@ -323,6 +347,8 @@ async def main() -> None:
     settings = get_consumer_settings()
     configure_logging(settings.service_name, settings.log_level)
 
+    initialise(settings.stream)
+
     database = Database.from_settings(settings)
     stream = RedisStreamConsumer.from_settings(settings)
     stop = asyncio.Event()
@@ -347,10 +373,14 @@ async def main() -> None:
     )
     consumer = OrderConsumer(settings=settings, database=database, stream=stream)
     janitor = StreamJanitor(settings=settings, stream=stream, consumer=consumer)
+    # La superficie HTTP vive en este proceso, no en un contenedor aparte: un contador solo lo
+    # puede servir quien lo incrementa (TICKET-009, decision 2).
+    observability = create_observability_app(settings=settings, database=database, stream=stream)
     try:
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(consumer.run(stop))
             tasks.create_task(janitor.run(stop))
+            tasks.create_task(serve(observability, settings=settings, stop=stop))
     finally:
         await stream.close()
         await database.dispose()

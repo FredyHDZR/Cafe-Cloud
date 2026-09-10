@@ -3,6 +3,7 @@ import logging
 import signal
 from contextlib import suppress
 
+from app.api.observability import create_observability_app, serve
 from app.domain.dead_letter import DeadLetter
 from app.domain.envelope import OrderCompletedEnvelope, parse_order_completed
 from app.domain.errors import NonRetryableError
@@ -12,6 +13,16 @@ from app.domain.retry import RetryPolicy
 from app.domain.timestamps import to_rfc3339, utc_now
 from app.infra.config import ConsumerSettings, get_consumer_settings
 from app.infra.logging import configure_logging, log_context
+from app.infra.metrics import (
+    ACK_FAILURES,
+    DEAD_LETTERS,
+    EVENT_PROCESSING_DURATION,
+    EVENT_RETRIES,
+    EVENTS_CONSUMED,
+    MESSAGES_CLAIMED,
+    NOTIFICATIONS_INSERTED,
+    register_consumer_metrics,
+)
 from app.infra.mongo import MongoDatabase
 from app.infra.streams import RedisStreamConsumer, StreamMessage
 from app.infra.tracing import trace_id_scope
@@ -68,7 +79,10 @@ class NotificationConsumer:
     ) -> None:
         self._inflight.add(message.entry_id)
         try:
-            with trace_id_scope(message.fields.get("trace_id")):
+            with (
+                trace_id_scope(message.fields.get("trace_id")),
+                EVENT_PROCESSING_DURATION.labels(stream=self._stream.stream).time(),
+            ):
                 await self._dispatch(message, stop=stop, delivery_count=delivery_count)
         finally:
             self._inflight.discard(message.entry_id)
@@ -117,6 +131,7 @@ class NotificationConsumer:
                 first_failed_at = first_failed_at or to_rfc3339(utc_now())
                 if failure.retryable and not self._policy.is_last(attempt):
                     delay = self._policy.delay_for(attempt)
+                    EVENT_RETRIES.labels(stream=self._stream.stream, reason=failure.reason).inc()
                     logger.warning(
                         "event_retry_scheduled",
                         extra=log_context(
@@ -151,6 +166,12 @@ class NotificationConsumer:
                     context=context,
                 )
                 return
+            EVENTS_CONSUMED.labels(
+                stream=self._stream.stream,
+                result="duplicate" if outcome.duplicate else "processed",
+            ).inc()
+            if not outcome.duplicate:
+                NOTIFICATIONS_INSERTED.inc()
             if await self._ack(message, context=context):
                 logger.info(
                     "event_acked",
@@ -197,6 +218,7 @@ class NotificationConsumer:
                 ),
             )
             return
+        DEAD_LETTERS.labels(stream=self._stream.stream, reason=failure.reason).inc()
         logger.error(
             "event_dead_lettered",
             extra=log_context(
@@ -216,6 +238,7 @@ class NotificationConsumer:
         try:
             await self._stream.ack(message.entry_id)
         except Exception as error:
+            ACK_FAILURES.labels(stream=self._stream.stream).inc()
             # El efecto ya esta escrito: sin XACK se reentrega y la deduplicacion lo absorbe.
             logger.error(
                 "event_ack_failed",
@@ -280,6 +303,7 @@ class StreamJanitor:
                 # El propio proceso lo esta trabajando: reclamarselo a si mismo seria duplicarlo.
                 logger.debug("message_claim_skipped", extra=context)
                 return
+            MESSAGES_CLAIMED.labels(stream=self._stream.stream).inc()
             logger.warning("message_claimed", extra=context)
             if delivery_count > self._settings.janitor_max_deliveries:
                 await self._consumer.exhaust(message, delivery_count=delivery_count)
@@ -306,6 +330,8 @@ def _install_stop_handlers(stop: asyncio.Event) -> None:
 async def main() -> None:
     settings = get_consumer_settings()
     configure_logging(settings.service_name, settings.log_level)
+
+    register_consumer_metrics(settings.stream)
 
     mongo = MongoDatabase.from_settings(settings)
     stream = RedisStreamConsumer.from_settings(settings)
@@ -340,10 +366,14 @@ async def main() -> None:
     )
     consumer = NotificationConsumer(settings=settings, mongo=mongo, stream=stream)
     janitor = StreamJanitor(settings=settings, stream=stream, consumer=consumer)
+    # La superficie HTTP vive en este proceso, no en el de la API: un contador solo lo puede
+    # servir quien lo incrementa (TICKET-009, decision 3).
+    observability = create_observability_app(settings=settings, mongo=mongo, stream=stream)
     try:
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(consumer.run(stop))
             tasks.create_task(janitor.run(stop))
+            tasks.create_task(serve(observability, settings=settings, stop=stop))
     finally:
         await stream.close()
         mongo.close()

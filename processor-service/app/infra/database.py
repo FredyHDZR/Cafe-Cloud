@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -41,6 +42,12 @@ class Database:
             except Exception:
                 await session.rollback()
                 raise
+
+    async def ping(self) -> None:
+        # No es una consulta de negocio: es el apreton de manos del driver, y por eso no vive
+        # en la capa de repositorios.
+        async with self._engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
 
     async def dispose(self) -> None:
         await self._engine.dispose()

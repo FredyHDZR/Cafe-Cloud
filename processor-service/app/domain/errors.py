@@ -23,3 +23,7 @@ class UnsupportedEventVersionError(NonRetryableError):
 
 class OrderNotCompletedError(NonRetryableError):
     reason = "order_not_completed"
+
+
+class OrderAlreadyCompletedError(NonRetryableError):
+    reason = "order_already_completed"

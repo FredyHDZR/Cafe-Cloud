@@ -23,6 +23,12 @@ class Notification:
     created_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class NotificationStats:
+    stored: int
+    oldest_age_seconds: float
+
+
 def notification_message(order_id: UUID) -> str:
     return MESSAGE_TEMPLATE.format(order_id=order_id)
 

@@ -131,6 +131,16 @@ class RedisStreamConsumer:
         )
         return {str(item["message_id"]): int(item["times_delivered"]) for item in pending}
 
+    async def pending_count(self) -> int:
+        summary = await self._client.xpending(self._stream, self._group)
+        return int(summary["pending"])
+
+    async def dlq_length(self) -> int:
+        return int(await self._client.xlen(self._dlq_stream))
+
+    async def ping(self) -> None:
+        await self._client.ping()
+
     async def dead_letter(self, fields: Mapping[str, str]) -> str:
         entry = cast(dict[FieldT, EncodableT], dict(fields))
         # Sin MAXLEN: recortar la DLQ seria tirar lo que se guarda justo para no perderlo.

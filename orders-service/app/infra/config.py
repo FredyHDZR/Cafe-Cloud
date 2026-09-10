@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     redis_url: RedisDsn = Field(alias="REDIS_URL")
     service_name: str = Field(alias="SERVICE_NAME", min_length=1)
     log_level: LogLevel = Field(alias="LOG_LEVEL")
+    health_probe_timeout_seconds: float = Field(
+        default=2.0, alias="HEALTH_PROBE_TIMEOUT_SECONDS", gt=0
+    )
 
     @field_validator("log_level", mode="before")
     @classmethod
