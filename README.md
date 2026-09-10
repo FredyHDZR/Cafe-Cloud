@@ -368,6 +368,14 @@ ejecuta `pytest` dentro, sin tocar ningún almacén. `make test-integration` **n
 levantado**, porque prueba el sistema que se entrega y no una réplica de laboratorio; corre dentro de
 la red del Compose y, como usa `docker compose run`, levanta el entorno si está caído.
 
+Debajo de cada objetivo lo que corre es `pytest -q`: los cinco `pyproject.toml` fijan
+`addopts = "-q"`, así que basta con invocar `pytest` para obtener la salida corta. Para lanzar un solo
+proyecto, con la imagen que ya construyó `make test-unit`:
+
+```bash
+docker run --rm cafecloud/orders-service:dev pytest
+```
+
 Hoy son **278 pruebas en cinco proyectos**: 58 de `orders-service`, 101 de `processor-service`, 100 de
 `notifier-service`, 9 de `cleanup-job` y 10 de integración. Ninguna está marcada como omitida.
 
